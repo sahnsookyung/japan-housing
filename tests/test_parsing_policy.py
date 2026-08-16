@@ -231,15 +231,15 @@ def test_priority_combines_price_and_straight_line_distance(
         base,
         external_id="cheap-far",
         recurring_total_yen=50_000,
-        latitude=35.7580,
-        longitude=139.7016,
+        latitude=app_config.ranking.anchor_latitude + 0.1,
+        longitude=app_config.ranking.anchor_longitude,
     )
     pricier_near = replace(
         base,
         external_id="pricey-near",
         recurring_total_yen=75_000,
-        latitude=35.6580,
-        longitude=139.7016,
+        latitude=app_config.ranking.anchor_latitude,
+        longitude=app_config.ranking.anchor_longitude,
     )
 
     cheap_outcome = classify(cheaper_farther, app_config.profile, app_config.ranking)

@@ -12,12 +12,13 @@ target_prefectures = ["Tokyo", "Kanagawa", "Saitama", "Chiba"]
 allowed_housing_types = ["private_room", "1R", "1K"]
 private_space_required = true
 registration_required = true
-commute_anchors = []
+commute_anchors = ["Kichijoji Station", "Shibuya Station", "Shinjuku Station"]
 
 [ranking]
-anchor_label = "Shibuya Station"
-anchor_latitude = 35.6580
-anchor_longitude = 139.7016
+# Arithmetic geographic centroid of the three commute anchors above.
+anchor_label = "Kichijoji / Shibuya / Shinjuku midpoint"
+anchor_latitude = 35.6840741
+anchor_longitude = 139.6604630
 price_weight = 0.60
 distance_weight = 0.40
 price_reference_yen = 80000

@@ -15,7 +15,7 @@ Within each eligibility, registration, and cost-evidence tier, priority is a low
 
 ```text
 100 × (0.60 × ranking monthly price / ¥80,000
-     + 0.40 × straight-line distance to Shibuya Station / 20 km)
+     + 0.40 × straight-line distance to the Kichijoji–Shibuya–Shinjuku midpoint / 20 km)
 ```
 
 For complete cost evidence, ranking price spreads initial and exit costs over three months for the
@@ -24,10 +24,11 @@ evidence tier and use only the verified recurring amount; unknown charges are ne
 the balanced weighting, a ¥10,000 monthly difference is equivalent to about 3.75 km. The dashboard
 also offers closer (40/60), balanced (60/40), cheaper (80/20), and Pareto-frontier views.
 
-Distance is calculated from provider-published coordinates and is never a train-time estimate.
+Distance is calculated from provider-published coordinates to the arithmetic geographic centroid
+of Kichijoji, Shibuya, and Shinjuku stations (`35.6840741, 139.6604630`); it is never a train-time estimate.
 Coordinates inconsistent with the stated prefecture are rejected. Missing coordinates are visibly
 flagged and conservatively scored as 30 km; distances above 50 km are excluded by default. The
-weights, references, bounds, penalty, and Shibuya anchor are configurable in `config/profile.toml`.
+weights, references, bounds, penalty, and midpoint anchor are configurable in `config/profile.toml`.
 
 This is an advisory personal search tool. Confirm the lease, residence-registration eligibility,
 full fees, vacancy, and applicant screening directly with the provider before paying.
@@ -49,7 +50,7 @@ The dashboard binds only to <http://127.0.0.1:8766>. It filters the latest repor
 three listings, and persists `shortlisted`, `contacted`, `application_started`, `reserved`, and
 `not_interested` decisions in local SQLite state.
 
-Search dates, budget, housing types, priority weights, Shibuya anchor, and runtime bounds live in
+Search dates, budget, housing types, priority weights, midpoint anchor, and runtime bounds live in
 `config/profile.toml`. Runtime state and generated artifacts are ignored by Git.
 
 ## Sources and coverage

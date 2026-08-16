@@ -107,6 +107,7 @@ def build_report_payload(
             "anchor_label": config.ranking.anchor_label,
             "anchor_latitude": config.ranking.anchor_latitude,
             "anchor_longitude": config.ranking.anchor_longitude,
+            "anchor_members": list(config.profile.commute_anchors),
             "price_weight": config.ranking.price_weight,
             "distance_weight": config.ranking.distance_weight,
             "price_reference_yen": config.ranking.price_reference_yen,

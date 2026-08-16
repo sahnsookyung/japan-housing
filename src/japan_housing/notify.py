@@ -219,6 +219,9 @@ def _report_content(payload: dict[str, object]) -> str:
     coverage = coverage if isinstance(coverage, list) else []
     updated = _safe(payload.get("generated_at") or "unknown")
     report_status = _safe(payload.get("status") or "unknown")
+    ranking = payload.get("ranking")
+    ranking = ranking if isinstance(ranking, dict) else {}
+    anchor_label = _safe(ranking.get("anchor_label") or "configured midpoint")
     unhealthy = sum(value not in {"healthy", "partial"} for value in statuses)
     partial = statuses.count("partial")
     lines = [
@@ -282,7 +285,7 @@ def _report_content(payload: dict[str, object]) -> str:
         score_text = f"score {score:.2f}" if isinstance(score, int | float) else "score unknown"
         distance = item.get("distance_to_anchor_km")
         distance_text = (
-            f"{distance:.2f} km to Shibuya"
+            f"{distance:.2f} km to {anchor_label}"
             if isinstance(distance, int | float)
             else "distance penalized"
         )

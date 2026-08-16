@@ -13,7 +13,23 @@ def test_profile_matches_move_window_and_safe_runtime(project_root: Path) -> Non
     assert config.profile.move_in_earliest.isoformat() == "2026-09-15"
     assert config.profile.move_in_latest.isoformat() == "2026-09-28"
     assert config.profile.monthly_budget_yen == 80_000
-    assert config.ranking.anchor_label == "Shibuya Station"
+    assert config.profile.commute_anchors == (
+        "Kichijoji Station",
+        "Shibuya Station",
+        "Shinjuku Station",
+    )
+    assert config.ranking.anchor_label == "Kichijoji / Shibuya / Shinjuku midpoint"
+    station_coordinates = (
+        (35 + 42 / 60 + 10 / 3600, 139 + 34 / 60 + 47 / 3600),
+        (35 + 39 / 60 + 31 / 3600, 139 + 42 / 60 + 5 / 3600),
+        (35 + 41 / 60 + 27 / 3600, 139 + 42 / 60 + 1 / 3600),
+    )
+    centroid = tuple(
+        sum(point[index] for point in station_coordinates) / len(station_coordinates)
+        for index in range(2)
+    )
+    assert config.ranking.anchor_latitude == pytest.approx(centroid[0], abs=0.0000001)
+    assert config.ranking.anchor_longitude == pytest.approx(centroid[1], abs=0.0000001)
     assert config.ranking.price_weight == 0.60
     assert config.ranking.distance_weight == 0.40
     assert config.ranking.price_reference_yen == 80_000

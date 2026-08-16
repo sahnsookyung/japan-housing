@@ -70,6 +70,10 @@ function priorityFor(item) {
   return item.priority_score;
 }
 
+function anchorLabel() {
+  return state.report?.ranking?.anchor_label || "configured midpoint";
+}
+
 function compareRank(left, right) {
   const leftKey = [...(left.rank_key || [999])];
   const rightKey = [...(right.rank_key || [999])];
@@ -153,7 +157,7 @@ function renderRows(records) {
     row.append(node("td", {}, [compareButton(item)]));
     row.append(node("td", {}, [detailBlock(item)]));
     const distance = Number.isFinite(item.distance_to_anchor_km)
-      ? `${item.distance_to_anchor_km.toFixed(2)} km to Shibuya`
+      ? `${item.distance_to_anchor_km.toFixed(2)} km to ${anchorLabel()}`
       : "Distance penalty applied";
     row.append(node("td", {}, [
       node("strong", { text: Number.isFinite(priorityFor(item)) ? priorityFor(item).toFixed(2) : "Unknown" }),
@@ -213,7 +217,7 @@ function renderCompare(records) {
     card.append(node("span", {
       text: `Priority ${Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "unknown"} · ${
         Number.isFinite(item.distance_to_anchor_km)
-          ? `${item.distance_to_anchor_km.toFixed(2)} km straight-line to Shibuya`
+          ? `${item.distance_to_anchor_km.toFixed(2)} km straight-line to ${anchorLabel()}`
           : "distance penalty applied"
       }`,
     }));

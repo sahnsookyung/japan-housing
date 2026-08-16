@@ -67,6 +67,7 @@ def test_report_message_shows_partial_sources_and_diverse_properties() -> None:
         "status": "partial",
         "housing_count": len(housing),
         "classification_counts": {"eligible": len(housing), "review": 0},
+        "ranking": {"anchor_label": "Three-station midpoint"},
         "source_health": [
             {"last_status": "healthy"},
             {"last_status": "partial"},
@@ -81,6 +82,7 @@ def test_report_message_shows_partial_sources_and_diverse_properties() -> None:
     assert "Room 0" in content
     assert "Room 1" not in content
     assert "Room 3" in content
+    assert "10.00 km to Three-station midpoint" in content
     assert sum(line.startswith("• ") for line in content.splitlines()) == 5
 
 

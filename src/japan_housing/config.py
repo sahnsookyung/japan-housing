@@ -57,9 +57,9 @@ class RuntimeConfig:
 
 @dataclass(frozen=True, slots=True)
 class RankingConfig:
-    anchor_label: str = "Shibuya Station"
-    anchor_latitude: float = 35.6580
-    anchor_longitude: float = 139.7016
+    anchor_label: str = "Kichijoji / Shibuya / Shinjuku midpoint"
+    anchor_latitude: float = 35.6840741
+    anchor_longitude: float = 139.6604630
     price_weight: float = 0.60
     distance_weight: float = 0.40
     price_reference_yen: int = 80_000
@@ -181,9 +181,11 @@ def load_config(path: Path) -> AppConfig:
         _positive(name, getattr(runtime, name))
 
     ranking = RankingConfig(
-        anchor_label=str(ranking_data.get("anchor_label", "Shibuya Station")),
-        anchor_latitude=float(ranking_data.get("anchor_latitude", 35.6580)),
-        anchor_longitude=float(ranking_data.get("anchor_longitude", 139.7016)),
+        anchor_label=str(
+            ranking_data.get("anchor_label", "Kichijoji / Shibuya / Shinjuku midpoint")
+        ),
+        anchor_latitude=float(ranking_data.get("anchor_latitude", 35.6840741)),
+        anchor_longitude=float(ranking_data.get("anchor_longitude", 139.6604630)),
         price_weight=float(ranking_data.get("price_weight", 0.60)),
         distance_weight=float(ranking_data.get("distance_weight", 0.40)),
         price_reference_yen=int(ranking_data.get("price_reference_yen", 80_000)),
