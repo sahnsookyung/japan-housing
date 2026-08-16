@@ -129,6 +129,58 @@ def _structured_objects(document: str) -> list[dict[str, object]]:
     return objects
 
 
+def _coordinate(value: object, minimum: float, maximum: float) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if minimum <= result <= maximum else None
+
+
+def _coordinates(ref: ListingRef, document: str) -> tuple[float | None, float | None, str]:
+    """Extract provider-published coordinates without calling a geocoder."""
+
+    for item in _structured_objects(document):
+        geo = item.get("geo") if isinstance(item.get("geo"), dict) else item
+        if not isinstance(geo, dict):
+            continue
+        latitude = _coordinate(geo.get("latitude"), 20, 46)
+        longitude = _coordinate(geo.get("longitude"), 122, 154)
+        if latitude is not None and longitude is not None:
+            return latitude, longitude, "provider_detail_structured_geo"
+
+    map_match = re.search(
+        r"(?:google\.[^/\"']+/maps\?(?:[^\"']*&)?q=|maps[^\"']*?[?&]q=)"
+        r"(-?\d{1,2}(?:\.\d+)?)(?:,|%2C)(-?\d{1,3}(?:\.\d+)?)",
+        document,
+        re.I,
+    )
+    if map_match:
+        latitude = _coordinate(map_match.group(1), 20, 46)
+        longitude = _coordinate(map_match.group(2), 122, 154)
+        if latitude is not None and longitude is not None:
+            return latitude, longitude, "provider_detail_map_link"
+
+    json_match = re.search(
+        r'["\']lat(?:itude)?["\']\s*:\s*["\']?(-?\d{1,2}(?:\.\d+)?)["\']?'
+        r'.{0,200}?["\'](?:lng|longitude)["\']\s*:\s*["\']?'
+        r'(-?\d{1,3}(?:\.\d+)?)["\']?',
+        document,
+        re.I | re.S,
+    )
+    if json_match:
+        latitude = _coordinate(json_match.group(1), 20, 46)
+        longitude = _coordinate(json_match.group(2), 122, 154)
+        if latitude is not None and longitude is not None:
+            return latitude, longitude, "provider_detail_embedded_geo"
+
+    latitude = _coordinate(ref.latitude, 20, 46)
+    longitude = _coordinate(ref.longitude, 122, 154)
+    if latitude is not None and longitude is not None:
+        return latitude, longitude, "provider_list_geo"
+    return None, None, "unknown"
+
+
 def _schema_type(item: dict[str, object], expected: str) -> bool:
     value = item.get("@type")
     if isinstance(value, list):
@@ -290,6 +342,7 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
     if initial is None:
         unknown.append("complete initial cost")
     monthly = "Monthly Apartment" in text
+    latitude, longitude, coordinate_basis = _coordinates(ref, document)
     return [
         _record(
             ref,
@@ -301,6 +354,9 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
             address=address,
             prefecture=prefecture,
             city=city,
+            latitude=latitude,
+            longitude=longitude,
+            coordinate_basis=coordinate_basis,
             housing_type=housing_type,
             private_space=(
                 True if housing_type in {"private_room", "1R", "1K"} or bool(apartment) else None
@@ -348,6 +404,7 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
     if initial is None:
         unknown.append("complete initial cost")
     monthly = "Monthly Rental" in text
+    latitude, longitude, coordinate_basis = _coordinates(ref, document)
     return [
         _record(
             ref,
@@ -358,6 +415,9 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
             address=address,
             prefecture=prefecture,
             city=_first((r"Location\s*([^\n,]+)",), text),
+            latitude=latitude,
+            longitude=longitude,
+            coordinate_basis=coordinate_basis,
             nearest_stations=tuple(dict.fromkeys(re.findall(r"([^\n]{1,60}?Sta\.)", text, re.I)))[
                 :3
             ],
@@ -401,6 +461,7 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
     prefecture = _prefecture(full_title) or _prefecture(text[:2500])
     city = _first((rf"{prefecture}\s+([^|\n]+)",), full_title)
     stations = tuple(dict.fromkeys(re.findall(r"([^\n]{1,60}?(?:Station|Sta\.))", text, re.I)))[:3]
+    latitude, longitude, coordinate_basis = _coordinates(ref, document)
     records: list[HousingRecord] = []
     row_pattern = r'<tr\s+([^>]*class="p-room__caset__row"[^>]*)>(.*?)</tr>'
     for match in re.finditer(row_pattern, document, re.I | re.S):
@@ -451,6 +512,9 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
                 unit_name=room_id,
                 prefecture=prefecture,
                 city=city,
+                latitude=latitude,
+                longitude=longitude,
+                coordinate_basis=coordinate_basis,
                 nearest_stations=stations,
                 walk_minutes_min=(
                     int(walk.group(1))

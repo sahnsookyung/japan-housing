@@ -225,8 +225,17 @@ def _report_content(payload: dict[str, object]) -> str:
     for item in selected:
         recurring = item.get("recurring_total_yen")
         cost = f"¥{recurring:,}/mo" if isinstance(recurring, int) else "cost unknown"
+        score = item.get("priority_score")
+        score_text = f"score {score:.2f}" if isinstance(score, int | float) else "score unknown"
+        distance = item.get("distance_to_anchor_km")
+        distance_text = (
+            f"{distance:.2f} km to Shibuya"
+            if isinstance(distance, int | float)
+            else "distance penalized"
+        )
         lines.append(
-            f"• [{_safe(item.get('title') or 'Untitled')[:100]}]({item.get('url')}) — {cost}"
+            f"• [{_safe(item.get('title') or 'Untitled')[:90]}]({item.get('url')}) — "
+            f"{cost} · {distance_text} · {score_text}"
         )
     lines.extend(("", "The attached Markdown report is replaced after every promoted run."))
     return "\n".join(lines)[:1950]

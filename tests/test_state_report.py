@@ -33,6 +33,9 @@ def _record() -> HousingRecord:
         url="https://source.example/detail/1",
         title="=formula-like title",
         prefecture="Tokyo",
+        latitude=35.6580,
+        longitude=139.7016,
+        coordinate_basis="fixture",
         housing_type="1K",
         private_space=True,
         rent_yen=60_000,
@@ -53,7 +56,12 @@ def _record() -> HousingRecord:
 def _promote(store: StateStore, config: AppConfig, run_id: str) -> None:
     record = _record()
     store.begin_source_run(run_id, "fixture")
-    store.stage(run_id, "page-1", record, classify(record, config.profile))
+    store.stage(
+        run_id,
+        "page-1",
+        record,
+        classify(record, config.profile, config.ranking),
+    )
     store.promote(run_id, _spec(), complete=True)
 
 
@@ -112,7 +120,7 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     with StateStore(state_path) as store:
         store.ensure_sources((_spec(),))
         _promote(store, app_config, "initial")
-        payload = build_report_payload(store, "report-1", [], {"offline": True})
+        payload = build_report_payload(store, "report-1", [], {"offline": True}, app_config)
 
     published = publish_report(tmp_path / "artifacts", payload)
     latest, latest_path = load_latest(tmp_path / "artifacts")
@@ -122,6 +130,7 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     assert published.markdown_path.exists()
     csv_text = published.csv_path.read_text(encoding="utf-8")
     assert "advertised_monthly_from_yen" in csv_text.splitlines()[0]
+    assert "priority_score" in csv_text.splitlines()[0]
     assert csv_text.splitlines()[1].startswith("eligible")
     assert "'=formula-like title" in csv_text
     manifest = json.loads((published.directory / "manifest.json").read_text(encoding="utf-8"))

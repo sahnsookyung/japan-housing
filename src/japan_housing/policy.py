@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import date
+from math import asin, cos, radians, sin, sqrt
 
-from .config import SearchProfile
+from .config import RankingConfig, SearchProfile
 from .models import Classification, CostScenario, HousingRecord
 
 
@@ -35,7 +36,58 @@ def _availability(record: HousingRecord) -> date | None:
         return None
 
 
-def classify(record: HousingRecord, profile: SearchProfile) -> Classification:
+def straight_line_distance_km(
+    latitude: float,
+    longitude: float,
+    anchor_latitude: float,
+    anchor_longitude: float,
+) -> float:
+    """Return great-circle distance; this is deliberately not a train-time estimate."""
+
+    latitude_delta = radians(anchor_latitude - latitude)
+    longitude_delta = radians(anchor_longitude - longitude)
+    start_latitude = radians(latitude)
+    end_latitude = radians(anchor_latitude)
+    haversine = sin(latitude_delta / 2) ** 2 + (
+        cos(start_latitude) * cos(end_latitude) * sin(longitude_delta / 2) ** 2
+    )
+    return 2 * 6371.0088 * asin(sqrt(min(1.0, haversine)))
+
+
+def _priority(
+    record: HousingRecord,
+    profile: SearchProfile,
+    ranking: RankingConfig,
+) -> tuple[float, float, float, float | None, int | None]:
+    ranking_price = record.recurring_total_yen
+    price_ratio = ranking_price / profile.monthly_budget_yen if ranking_price is not None else 2.0
+    distance = None
+    if record.latitude is not None and record.longitude is not None:
+        distance = straight_line_distance_km(
+            record.latitude,
+            record.longitude,
+            ranking.anchor_latitude,
+            ranking.anchor_longitude,
+        )
+    scored_distance = distance if distance is not None else ranking.missing_distance_penalty_km
+    price_component = 100 * ranking.price_weight * price_ratio
+    distance_component = (
+        100 * ranking.distance_weight * scored_distance / ranking.distance_reference_km
+    )
+    return (
+        round(price_component + distance_component, 2),
+        round(price_component, 2),
+        round(distance_component, 2),
+        round(distance, 2) if distance is not None else None,
+        ranking_price,
+    )
+
+
+def classify(
+    record: HousingRecord,
+    profile: SearchProfile,
+    ranking: RankingConfig,
+) -> Classification:
     reasons: list[str] = []
     cautions: list[str] = []
     excluded: list[str] = []
@@ -126,6 +178,17 @@ def classify(record: HousingRecord, profile: SearchProfile) -> Classification:
         else:
             cautions.append("address registration must be confirmed before booking")
 
+    priority_score, price_component, distance_component, distance, ranking_price = _priority(
+        record, profile, ranking
+    )
+    if distance is None:
+        cautions.append(
+            f"distance to {ranking.anchor_label} unavailable; "
+            f"ranking applies a {ranking.missing_distance_penalty_km:g} km penalty"
+        )
+    else:
+        reasons.append(f"{distance:.2f} km straight-line to {ranking.anchor_label}")
+
     landing_30 = cost_scenario(record, 1)
     landing_60 = cost_scenario(record, 2)
     landing_90 = cost_scenario(record, 3)
@@ -155,8 +218,8 @@ def classify(record: HousingRecord, profile: SearchProfile) -> Classification:
         0 if name == "eligible" else 1 if name == "review" else 2,
         0 if record.registration_confidence == "confirmed" else 1,
         0 if scenario.complete else 1,
+        priority_score,
         deadline_penalty,
-        scenario.effective_monthly_yen or 10**9,
         record.walk_minutes_min or 999,
         record.stable_key,
     )
@@ -166,6 +229,11 @@ def classify(record: HousingRecord, profile: SearchProfile) -> Classification:
         tuple(reasons),
         tuple(cautions),
         rank_key,
+        priority_score,
+        price_component,
+        distance_component,
+        distance,
+        ranking_price,
         landing_30,
         landing_60,
         landing_90,

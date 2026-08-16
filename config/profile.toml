@@ -14,6 +14,15 @@ private_space_required = true
 registration_required = true
 commute_anchors = []
 
+[ranking]
+anchor_label = "Shibuya Station"
+anchor_latitude = 35.6580
+anchor_longitude = 139.7016
+price_weight = 0.60
+distance_weight = 0.40
+distance_reference_km = 20.0
+missing_distance_penalty_km = 30.0
+
 [runtime]
 state_path = "state/housing.sqlite3"
 artifacts_path = "artifacts"

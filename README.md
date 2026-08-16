@@ -11,6 +11,18 @@ The configured recurring-cost ceiling is **¥80,000**, including every known man
 Unknown charges are never treated as zero. Listings with ambiguous registration, availability,
 foreigner acceptance, or total cost stay in manual review.
 
+Within each eligibility, registration, and cost-evidence tier, priority is a lower-is-better score:
+
+```text
+100 × (0.60 × recurring monthly price / ¥80,000
+     + 0.40 × straight-line distance to Shibuya Station / 20 km)
+```
+
+This makes a ¥10,000 monthly difference equivalent to about 3.75 km. Distance is calculated from
+provider-published coordinates; it is not a train-time estimate. Missing coordinates are visibly
+flagged and conservatively scored as 30 km. The weights, references, penalty, and Shibuya anchor
+are configurable in `config/profile.toml`.
+
 This is an advisory personal search tool. Confirm the lease, residence-registration eligibility,
 full fees, vacancy, and applicant screening directly with the provider before paying.
 
@@ -31,8 +43,8 @@ The dashboard binds only to <http://127.0.0.1:8766>. It filters the latest repor
 three listings, and persists `shortlisted`, `contacted`, `application_started`, `reserved`, and
 `not_interested` decisions in local SQLite state.
 
-Search dates, budget, housing types, and runtime bounds live in `config/profile.toml`. Runtime state
-and generated artifacts are ignored by Git.
+Search dates, budget, housing types, priority weights, Shibuya anchor, and runtime bounds live in
+`config/profile.toml`. Runtime state and generated artifacts are ignored by Git.
 
 ## Sources and coverage
 

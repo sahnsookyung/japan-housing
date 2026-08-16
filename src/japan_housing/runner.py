@@ -107,14 +107,25 @@ def _cache_reusable(ref: ListingRef, cache: CachedPage | None) -> bool:
 def _stage_records(
     store: StateStore,
     run_id: str,
-    page_external_id: str,
+    ref: ListingRef,
     records: Iterable[HousingRecord],
     config: AppConfig,
 ) -> int:
     count = 0
     for record in records:
-        result = classify(record, config.profile)
-        store.stage(run_id, page_external_id, record, result)
+        if record.latitude is None and ref.latitude is not None:
+            record.latitude = ref.latitude
+        if record.longitude is None and ref.longitude is not None:
+            record.longitude = ref.longitude
+        if (
+            record.latitude is not None
+            and record.longitude is not None
+            and record.coordinate_basis == "unknown"
+        ):
+            record.coordinate_basis = "provider_list_geo"
+        record.schema_version = HOUSING_RECORD_SCHEMA_VERSION
+        result = classify(record, config.profile, config.ranking)
+        store.stage(run_id, ref.external_id, record, result)
         count += 1
     return count
 
@@ -161,9 +172,7 @@ def _run_source(
             cache = cache_by_id[ref.external_id]
             if _cache_reusable(ref, cache):
                 assert cache is not None
-                staged_count += _stage_records(
-                    store, run_id, ref.external_id, cache.records, config
-                )
+                staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 metrics.detail_cache_hits += 1
 
         def fetch(ref: ListingRef) -> list[HousingRecord] | None:
@@ -186,9 +195,7 @@ def _run_source(
             if isinstance(result, Exception):
                 metrics.parse_failures += 1
                 if cache:
-                    staged_count += _stage_records(
-                        store, run_id, ref.external_id, cache.records, config
-                    )
+                    staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
             if result is None or (not result and spec.source_id == "oakhouse"):
                 verified_pages.add(ref.external_id)
@@ -198,14 +205,12 @@ def _run_source(
             if not result:
                 metrics.parse_failures += 1
                 if cache:
-                    staged_count += _stage_records(
-                        store, run_id, ref.external_id, cache.records, config
-                    )
+                    staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
             classifications: list[Classification] = []
             verified_pages.add(ref.external_id)
             for record in result:
-                outcome = classify(record, config.profile)
+                outcome = classify(record, config.profile, config.ranking)
                 classifications.append(outcome)
                 store.stage(run_id, ref.external_id, record, outcome)
                 staged_count += 1
@@ -219,9 +224,7 @@ def _run_source(
                 continue
             cache = cache_by_id[ref.external_id]
             if cache:
-                staged_count += _stage_records(
-                    store, run_id, ref.external_id, cache.records, config
-                )
+                staged_count += _stage_records(store, run_id, ref, cache.records, config)
         store.checkpoint()
 
         status = "healthy"
@@ -336,7 +339,7 @@ def run_refresh(
             "detail_cache_hits": sum(result.metrics.detail_cache_hits for result in results),
             "detail_network": sum(result.metrics.detail_network for result in results),
         }
-        payload = build_report_payload(store, run_id, results, performance)
+        payload = build_report_payload(store, run_id, results, performance, config)
         report = publish_report(config.runtime.artifacts_path, payload)
         notification = None
         report_message = None
@@ -366,7 +369,7 @@ def publish_offline_report(config: AppConfig) -> PublishedReport:
     run_id = _run_id("offline")
     with StateStore(config.runtime.state_path) as store:
         store.ensure_sources(source_specs())
-        payload = build_report_payload(store, run_id, [], {"offline": True})
+        payload = build_report_payload(store, run_id, [], {"offline": True}, config)
         return publish_report(config.runtime.artifacts_path, payload)
 
 

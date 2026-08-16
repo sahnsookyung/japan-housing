@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -61,10 +62,47 @@ def _external_id(url: str) -> str:
 
 
 def _ref(
-    source_id: str, url: str, title_hint: str = "", last_modified: str | None = None
+    source_id: str,
+    url: str,
+    title_hint: str = "",
+    last_modified: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
 ) -> ListingRef:
     fingerprint = hashlib.sha256(f"{url}|{title_hint}|{last_modified or ''}".encode()).hexdigest()
-    return ListingRef(source_id, _external_id(url), url, fingerprint, title_hint, last_modified)
+    return ListingRef(
+        source_id,
+        _external_id(url),
+        url,
+        fingerprint,
+        title_hint,
+        last_modified,
+        latitude,
+        longitude,
+    )
+
+
+def _wagaya_coordinates(document: str) -> dict[str, tuple[float, float]]:
+    match = re.search(r"var\s+estateDataFromPHP\s*=\s*(\[.*?\])\s*;", document, re.S)
+    if not match:
+        return {}
+    try:
+        values = json.loads(match.group(1))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    result: dict[str, tuple[float, float]] = {}
+    for item in values if isinstance(values, list) else ():
+        if not isinstance(item, dict):
+            continue
+        external_id = str(item.get("icd") or "")
+        try:
+            latitude = float(item["lat"])
+            longitude = float(item["lng"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if external_id.isdigit() and 20 <= latitude <= 46 and 122 <= longitude <= 154:
+            result[external_id] = (latitude, longitude)
+    return result
 
 
 class SourceAdapter:
@@ -111,10 +149,21 @@ class SourceAdapter:
             if response.status_code != 200:
                 raise HttpFailure(f"list page returned {response.status_code}: {seed}")
             pages += 1
+            coordinates = (
+                _wagaya_coordinates(response.text) if self.spec.source_id == "wagaya" else {}
+            )
             for link, label in links(response.text, response.url):
                 host = (urlparse(link).hostname or "").lower()
                 if host in self.spec.allowed_hosts and self._is_detail(link):
-                    item = _ref(self.spec.source_id, link, label)
+                    external_id = _external_id(link)
+                    latitude, longitude = coordinates.get(external_id, (None, None))
+                    item = _ref(
+                        self.spec.source_id,
+                        link,
+                        label,
+                        latitude=latitude,
+                        longitude=longitude,
+                    )
                     refs[item.external_id] = item
         end = start + len(selected)
         complete = end >= len(self.spec.seeds)

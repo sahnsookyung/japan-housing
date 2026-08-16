@@ -52,9 +52,21 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RankingConfig:
+    anchor_label: str = "Shibuya Station"
+    anchor_latitude: float = 35.6580
+    anchor_longitude: float = 139.7016
+    price_weight: float = 0.60
+    distance_weight: float = 0.40
+    distance_reference_km: float = 20.0
+    missing_distance_penalty_km: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     profile: SearchProfile
     runtime: RuntimeConfig
+    ranking: RankingConfig
 
 
 def _positive(name: str, value: int | float) -> None:
@@ -67,6 +79,7 @@ def load_config(path: Path) -> AppConfig:
         payload = tomllib.load(handle)
     profile_data = payload.get("profile") or {}
     runtime_data = payload.get("runtime") or {}
+    ranking_data = payload.get("ranking") or {}
     try:
         profile = SearchProfile(
             move_in_earliest=date.fromisoformat(str(profile_data["move_in_earliest"])),
@@ -152,4 +165,31 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("per_host_workers cannot exceed global_workers")
     for name in ("per_host_interval_seconds", "connect_timeout_seconds", "read_timeout_seconds"):
         _positive(name, getattr(runtime, name))
-    return AppConfig(profile, runtime)
+
+    ranking = RankingConfig(
+        anchor_label=str(ranking_data.get("anchor_label", "Shibuya Station")),
+        anchor_latitude=float(ranking_data.get("anchor_latitude", 35.6580)),
+        anchor_longitude=float(ranking_data.get("anchor_longitude", 139.7016)),
+        price_weight=float(ranking_data.get("price_weight", 0.60)),
+        distance_weight=float(ranking_data.get("distance_weight", 0.40)),
+        distance_reference_km=float(ranking_data.get("distance_reference_km", 20.0)),
+        missing_distance_penalty_km=float(ranking_data.get("missing_distance_penalty_km", 30.0)),
+    )
+    if not ranking.anchor_label.strip():
+        raise ValueError("ranking anchor_label cannot be empty")
+    if not -90 <= ranking.anchor_latitude <= 90:
+        raise ValueError("ranking anchor_latitude must be between -90 and 90")
+    if not -180 <= ranking.anchor_longitude <= 180:
+        raise ValueError("ranking anchor_longitude must be between -180 and 180")
+    for name in (
+        "price_weight",
+        "distance_weight",
+        "distance_reference_km",
+        "missing_distance_penalty_km",
+    ):
+        _positive(name, getattr(ranking, name))
+    if abs(ranking.price_weight + ranking.distance_weight - 1.0) > 1e-9:
+        raise ValueError("ranking price_weight and distance_weight must sum to 1")
+    if ranking.missing_distance_penalty_km < ranking.distance_reference_km:
+        raise ValueError("missing_distance_penalty_km must be at least distance_reference_km")
+    return AppConfig(profile, runtime, ranking)

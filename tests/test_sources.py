@@ -61,3 +61,32 @@ def test_invalid_list_cursor_fails_closed() -> None:
 
     with pytest.raises(Exception, match="cursor"):
         adapter.discover("not-an-integer", 1)
+
+
+def test_wagaya_list_coordinates_are_attached_to_the_matching_listing() -> None:
+    class WagayaClient:
+        def robots_allowed(self, url: str, *, allowed_hosts: frozenset[str]) -> bool:
+            return True
+
+        def get(self, url: str, *, allowed_hosts: frozenset[str]) -> HttpResponse:
+            document = """
+                <a href="https://wagaya-japan.com/en/chintai_detail.php?id=4741243">Room</a>
+                <script>var estateDataFromPHP = [
+                  {"icd":"4741243","lat":35.6997,"lng":139.6900}
+                ];</script>
+            """
+            return HttpResponse(url, 200, document, len(document), {})
+
+    spec = SourceSpec(
+        "wagaya",
+        "wagaya Japan",
+        ("https://wagaya-japan.com/en/rent/tokyo/list/",),
+        frozenset({"wagaya-japan.com"}),
+        (r"/en/chintai_detail\.php\?id=\d+$",),
+    )
+
+    batch = SourceAdapter(spec, WagayaClient()).discover(None, 1)
+
+    assert batch.refs[0].external_id == "4741243"
+    assert batch.refs[0].latitude == 35.6997
+    assert batch.refs[0].longitude == 139.6900

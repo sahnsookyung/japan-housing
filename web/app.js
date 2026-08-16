@@ -130,6 +130,14 @@ function renderRows(records) {
     const row = node("tr");
     row.append(node("td", {}, [compareButton(item)]));
     row.append(node("td", {}, [detailBlock(item)]));
+    const distance = Number.isFinite(item.distance_to_anchor_km)
+      ? `${item.distance_to_anchor_km.toFixed(2)} km to Shibuya`
+      : "Distance penalty applied";
+    row.append(node("td", {}, [
+      node("strong", { text: Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "Unknown" }),
+      node("small", { text: distance }),
+      node("small", { text: "60% price · 40% straight-line distance" }),
+    ]));
     const monthly = node("td");
     monthly.append(node("strong", { text: yen(item.recurring_total_yen) }));
     if (item.source_id === "oakhouse") {
@@ -177,6 +185,13 @@ function renderCompare(records) {
     const card = node("article", { className: "compare-card" });
     card.append(safeLink(item.url, item.title));
     card.append(node("strong", { text: `${yen(item.recurring_total_yen)}/month` }));
+    card.append(node("span", {
+      text: `Priority ${Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "unknown"} · ${
+        Number.isFinite(item.distance_to_anchor_km)
+          ? `${item.distance_to_anchor_km.toFixed(2)} km straight-line to Shibuya`
+          : "distance penalty applied"
+      }`,
+    }));
     if (item.source_id === "oakhouse") {
       card.append(node("span", {
         text: `Available room: ${yen(item.rent_yen)} rent + ${yen(item.management_fee_yen)} maintenance`,

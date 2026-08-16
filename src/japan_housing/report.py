@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .config import AppConfig
 from .models import SourceRunResult, iso_now
 from .state import StateStore
 
@@ -36,6 +37,7 @@ def build_report_payload(
     run_id: str,
     source_results: list[SourceRunResult],
     performance: dict[str, Any],
+    config: AppConfig,
 ) -> dict[str, Any]:
     health = store.source_health()
     statuses = _source_status_map(health)
@@ -55,7 +57,7 @@ def build_report_payload(
         else "healthy"
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "generated_at": iso_now(),
         "status": status,
@@ -64,6 +66,19 @@ def build_report_payload(
         "track_counts": tracks,
         "source_health": health,
         "performance": performance,
+        "ranking": {
+            "method": "weighted_normalized_price_and_straight_line_distance",
+            "direction": "lower_is_better",
+            "anchor_label": config.ranking.anchor_label,
+            "anchor_latitude": config.ranking.anchor_latitude,
+            "anchor_longitude": config.ranking.anchor_longitude,
+            "price_weight": config.ranking.price_weight,
+            "distance_weight": config.ranking.distance_weight,
+            "price_reference_yen": config.profile.monthly_budget_yen,
+            "distance_reference_km": config.ranking.distance_reference_km,
+            "missing_distance_penalty_km": config.ranking.missing_distance_penalty_km,
+            "uses_train_time": False,
+        },
         "unknown_notifications": store.unknown_notifications(),
         "manual_fallbacks": [
             {
@@ -102,6 +117,7 @@ def build_report_payload(
 
 def _markdown(payload: dict[str, Any]) -> str:
     counts = payload["classification_counts"]
+    ranking = payload["ranking"]
     lines = [
         "# Japan Housing Report",
         "",
@@ -116,6 +132,18 @@ def _markdown(payload: dict[str, Any]) -> str:
         (
             "> Address registration, final fees, availability, and contract eligibility "
             "must be confirmed before payment."
+        ),
+        (
+            "> Priority is lower-is-better: "
+            f"{ranking['price_weight']:.0%} verified recurring monthly price plus "
+            f"{ranking['distance_weight']:.0%} straight-line distance to "
+            f"{ranking['anchor_label']}. It does not estimate train time."
+        ),
+        (
+            f"> References: ¥{ranking['price_reference_yen']:,} and "
+            f"{ranking['distance_reference_km']:g} km each normalize to 100% of their "
+            f"component; missing distance is scored as "
+            f"{ranking['missing_distance_penalty_km']:g} km."
         ),
         "",
     ]
@@ -142,9 +170,20 @@ def _markdown(payload: dict[str, Any]) -> str:
             lines.append(f"### [{title}]({item.get('url')})")
             summary = (
                 f"{cost} · {place or 'location unverified'} · {item.get('track')} · "
-                f"decision: `{decision}`"
+                f"priority {item.get('priority_score', 'unknown')} · decision: `{decision}`"
             )
             lines.append(summary)
+            distance = item.get("distance_to_anchor_km")
+            if isinstance(distance, int | float):
+                lines.append(
+                    f"- Distance: {distance:.2f} km straight-line to {ranking['anchor_label']} "
+                    "(not train time)"
+                )
+            else:
+                lines.append(
+                    f"- Distance: unavailable; {ranking['missing_distance_penalty_km']:g} km "
+                    "ranking penalty applied"
+                )
             if item.get("available_text"):
                 lines.append(f"- Availability: {item['available_text']}")
             if item.get("source_id") == "oakhouse":
@@ -197,6 +236,13 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "prefecture",
         "city",
         "housing_type",
+        "priority_score",
+        "priority_price_component",
+        "priority_distance_component",
+        "distance_to_anchor_km",
+        "latitude",
+        "longitude",
+        "coordinate_basis",
         "recurring_total_yen",
         "advertised_monthly_from_yen",
         "price_basis",

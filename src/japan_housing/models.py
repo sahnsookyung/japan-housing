@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 ClassificationName = Literal["eligible", "review", "excluded"]
 SourceStatus = Literal["healthy", "partial", "failed", "drifted"]
-HOUSING_RECORD_SCHEMA_VERSION = 2
+HOUSING_RECORD_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +21,8 @@ class ListingRef:
     list_fingerprint: str
     title_hint: str = ""
     last_modified: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 @dataclass(slots=True)
@@ -36,6 +38,9 @@ class HousingRecord:
     address: str = ""
     prefecture: str = ""
     city: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
+    coordinate_basis: str = "unknown"
     nearest_stations: tuple[str, ...] = ()
     walk_minutes_min: int | None = None
     housing_type: str = "unknown"
@@ -120,6 +125,11 @@ class Classification:
     reasons: tuple[str, ...]
     cautions: tuple[str, ...]
     rank_key: tuple[Any, ...]
+    priority_score: float
+    priority_price_component: float
+    priority_distance_component: float
+    distance_to_anchor_km: float | None
+    ranking_price_yen: int | None
     landing_30: CostScenario
     landing_60: CostScenario
     landing_90: CostScenario
