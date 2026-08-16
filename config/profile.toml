@@ -1,0 +1,36 @@
+[profile]
+move_in_earliest = "2026-09-15"
+move_in_latest = "2026-09-23"
+landing_duration_months_min = 1
+landing_duration_months_max = 3
+long_term_comparison_months = 12
+monthly_budget_yen = 80000
+visa_status = "working_holiday"
+japanese_level = "N4"
+applicant_gender = "male"
+target_prefectures = ["Tokyo", "Kanagawa", "Saitama", "Chiba"]
+allowed_housing_types = ["private_room", "1R", "1K"]
+private_space_required = true
+registration_required = true
+commute_anchors = []
+
+[runtime]
+state_path = "state/housing.sqlite3"
+artifacts_path = "artifacts"
+dashboard_host = "127.0.0.1"
+dashboard_port = 8766
+global_workers = 8
+per_host_workers = 2
+max_queued_tasks = 16
+per_host_interval_seconds = 0.75
+list_page_budget_per_source = 100
+detail_budget_per_source = 300
+request_budget_per_run = 1200
+connect_timeout_seconds = 5.0
+read_timeout_seconds = 20.0
+response_limit_bytes = 5242880
+max_attempts = 3
+circuit_failure_threshold = 5
+checkpoint_every = 25
+alert_limit = 20
+user_agent = "JapanHousingBot/0.1 (+local personal housing search)"

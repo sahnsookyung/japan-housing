@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Japan Housing</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">GREATER TOKYO · SEPTEMBER 2026</p>
+      <h1>Japan Housing</h1>
+      <p id="summary" class="summary">Loading the latest verified snapshot…</p>
+    </div>
+    <button id="refresh" type="button">Refresh report</button>
+  </header>
+
+  <main>
+    <section class="notice" aria-label="Important reminder">
+      Confirm address registration, total fees, availability, and working-holiday eligibility before paying.
+    </section>
+
+    <section class="filters" aria-labelledby="filter-heading">
+      <div class="section-heading">
+        <h2 id="filter-heading">Find the practical shortlist</h2>
+        <button id="reset" class="secondary" type="button">Reset filters</button>
+      </div>
+      <div class="filter-grid">
+        <label>Search
+          <input id="query" type="search" placeholder="Area, station, property">
+        </label>
+        <label>Classification
+          <select id="classification">
+            <option value="actionable">Eligible + review</option>
+            <option value="eligible">Eligible</option>
+            <option value="review">Manual review</option>
+            <option value="excluded">Excluded</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+        <label>Track
+          <select id="track">
+            <option value="all">Landing + long-term</option>
+            <option value="landing">Landing</option>
+            <option value="long_term">Long-term</option>
+            <option value="both">Both/unknown</option>
+          </select>
+        </label>
+        <label>Decision
+          <select id="decision">
+            <option value="all">All decisions</option>
+            <option value="new">New</option>
+            <option value="shortlisted">Shortlisted</option>
+            <option value="contacted">Contacted</option>
+            <option value="application_started">Application started</option>
+            <option value="reserved">Reserved</option>
+            <option value="not_interested">Not interested</option>
+          </select>
+        </label>
+        <label>Maximum recurring cost
+          <input id="max-cost" type="number" min="0" step="5000" value="80000">
+        </label>
+      </div>
+    </section>
+
+    <section aria-labelledby="results-heading">
+      <div class="section-heading">
+        <h2 id="results-heading">Ranked housing</h2>
+        <p id="result-count" aria-live="polite"></p>
+      </div>
+      <div id="error" class="error" role="alert" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Compare</th>
+              <th scope="col">Property</th>
+              <th scope="col">Monthly</th>
+              <th scope="col">Available</th>
+              <th scope="col">Registration</th>
+              <th scope="col">Decision</th>
+            </tr>
+          </thead>
+          <tbody id="results"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="compare-section" aria-labelledby="compare-heading" hidden>
+      <div class="section-heading">
+        <h2 id="compare-heading">Compare shortlist</h2>
+        <button id="clear-compare" class="secondary" type="button">Clear</button>
+      </div>
+      <div id="compare" class="compare-grid"></div>
+    </section>
+
+    <section aria-labelledby="fallback-heading">
+      <h2 id="fallback-heading">Manual fallbacks</h2>
+      <div id="fallbacks" class="fallback-grid"></div>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
+

@@ -1,0 +1,77 @@
+:root {
+  --ink: #17211d;
+  --muted: #5d6b64;
+  --paper: #f4f2e9;
+  --surface: #fffdf7;
+  --line: #d6d4c9;
+  --accent: #c9492b;
+  --green: #167052;
+  --amber: #9a6500;
+  --red: #a93030;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; line-height: 1.45; }
+button, input, select { font: inherit; }
+button, select, input { border: 1px solid var(--line); border-radius: .45rem; }
+button { padding: .65rem .9rem; color: white; background: var(--ink); cursor: pointer; }
+button:hover, button:focus-visible { background: var(--accent); }
+button.secondary { color: var(--ink); background: transparent; }
+button.compare { padding: .4rem .6rem; font-size: .8rem; }
+button.compare.active { background: var(--green); }
+a { color: var(--ink); font-weight: 700; text-underline-offset: .2em; }
+a:hover, a:focus-visible { color: var(--accent); }
+
+.site-header {
+  display: flex; justify-content: space-between; gap: 2rem; align-items: center;
+  padding: 2rem max(1rem, calc((100vw - 1200px) / 2));
+  color: white; background: var(--ink);
+}
+.site-header h1 { margin: 0; font-family: Georgia, serif; font-size: clamp(2.5rem, 7vw, 5rem); line-height: .95; }
+.eyebrow { margin: 0 0 .6rem; color: #efb44c; font-size: .78rem; font-weight: 800; letter-spacing: .15em; }
+.summary { margin: .9rem 0 0; color: #cad2cd; }
+main { width: min(1200px, calc(100% - 2rem)); margin: 1.5rem auto 4rem; }
+section { margin: 1.25rem 0; }
+.notice { padding: 1rem 1.2rem; border-left: .35rem solid var(--accent); background: #fff1dd; }
+.filters, #compare-section, main > section:last-child { padding: 1.2rem; border: 1px solid var(--line); background: var(--surface); }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.section-heading h2, section > h2 { font-family: Georgia, serif; }
+.filter-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .8rem; }
+label { display: grid; gap: .3rem; color: var(--muted); font-size: .82rem; font-weight: 700; }
+input, select { width: 100%; padding: .65rem; color: var(--ink); background: white; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); }
+table { width: 100%; border-collapse: collapse; min-width: 900px; }
+th, td { padding: .8rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { color: var(--muted); background: #ebe9df; font-size: .75rem; letter-spacing: .05em; text-transform: uppercase; }
+td strong, td small, .property-cell > * { display: block; }
+td small { margin-top: .2rem; color: var(--muted); }
+.property-cell { min-width: 280px; }
+.badge, .registration { display: inline-block; width: fit-content; margin: .35rem 0; padding: .18rem .45rem; border-radius: 999px; font-size: .72rem; font-weight: 800; text-transform: uppercase; }
+.badge.eligible, .registration.confirmed { color: var(--green); background: #dceddf; }
+.badge.review, .registration.probable { color: var(--amber); background: #fff0c7; }
+.badge.excluded, .registration.unknown { color: var(--red); background: #f7dada; }
+.caution { color: var(--amber) !important; }
+.error { margin: .8rem 0; padding: .8rem; color: var(--red); border: 1px solid var(--red); background: #fff1f1; }
+.compare-grid, .fallback-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
+.compare-card, .fallback-card { display: grid; gap: .5rem; padding: 1rem; border: 1px solid var(--line); background: white; }
+.fallback-card p { margin: 0; color: var(--muted); }
+
+@media (max-width: 800px) {
+  .site-header { align-items: flex-start; }
+  .filter-grid, .compare-grid, .fallback-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { --ink: #e8eee9; --muted: #aab5af; --paper: #111714; --surface: #1b2420; --line: #3d4943; }
+  .site-header { color: white; background: #0a0f0d; }
+  input, select, .compare-card, .fallback-card { color: var(--ink); background: #121916; }
+  .notice { color: #f3dcb5; background: #342612; }
+  th { background: #252f2a; }
+}
