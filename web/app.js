@@ -6,6 +6,7 @@ const controls = {
   track: document.querySelector("#track"),
   decision: document.querySelector("#decision"),
   maxCost: document.querySelector("#max-cost"),
+  rankingView: document.querySelector("#ranking-view"),
 };
 const state = { report: null, selected: new Set() };
 
@@ -59,7 +60,28 @@ function matches(item) {
   if (controls.track.value !== "all" && item.track !== controls.track.value) return false;
   if (controls.decision.value !== "all" && item.decision_status !== controls.decision.value) return false;
   if (maxCost && (!Number.isInteger(item.recurring_total_yen) || item.recurring_total_yen > maxCost)) return false;
+  if (controls.rankingView.value === "pareto" && !item.pareto_frontier) return false;
   return true;
+}
+
+function priorityFor(item) {
+  if (controls.rankingView.value === "closer") return item.priority_closer_score;
+  if (controls.rankingView.value === "cheaper") return item.priority_cheaper_score;
+  return item.priority_score;
+}
+
+function compareRank(left, right) {
+  const leftKey = [...(left.rank_key || [999])];
+  const rightKey = [...(right.rank_key || [999])];
+  leftKey[3] = priorityFor(left);
+  rightKey[3] = priorityFor(right);
+  for (let index = 0; index < Math.max(leftKey.length, rightKey.length); index += 1) {
+    const a = leftKey[index] ?? "";
+    const b = rightKey[index] ?? "";
+    if (a < b) return -1;
+    if (a > b) return 1;
+  }
+  return 0;
 }
 
 function detailBlock(item) {
@@ -134,9 +156,9 @@ function renderRows(records) {
       ? `${item.distance_to_anchor_km.toFixed(2)} km to Shibuya`
       : "Distance penalty applied";
     row.append(node("td", {}, [
-      node("strong", { text: Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "Unknown" }),
+      node("strong", { text: Number.isFinite(priorityFor(item)) ? priorityFor(item).toFixed(2) : "Unknown" }),
       node("small", { text: distance }),
-      node("small", { text: "60% price · 40% straight-line distance" }),
+      node("small", { text: item.pareto_frontier ? "Pareto frontier" : controls.rankingView.options[controls.rankingView.selectedIndex].text }),
     ]));
     const monthly = node("td");
     monthly.append(node("strong", { text: yen(item.recurring_total_yen) }));
@@ -186,6 +208,9 @@ function renderCompare(records) {
     card.append(safeLink(item.url, item.title));
     card.append(node("strong", { text: `${yen(item.recurring_total_yen)}/month` }));
     card.append(node("span", {
+      text: `Ranking cost ${yen(item.ranking_price_yen)} · ${(item.ranking_price_basis || "unknown").replaceAll("_", " ")}`,
+    }));
+    card.append(node("span", {
       text: `Priority ${Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "unknown"} · ${
         Number.isFinite(item.distance_to_anchor_km)
           ? `${item.distance_to_anchor_km.toFixed(2)} km straight-line to Shibuya`
@@ -228,7 +253,7 @@ function showError(message) {
 function render() {
   if (!state.report) return;
   showError("");
-  const records = (state.report.housing || []).filter(matches);
+  const records = (state.report.housing || []).filter(matches).sort(compareRank);
   document.querySelector("#result-count").textContent = `${records.length} shown`;
   document.querySelector("#summary").textContent =
     `${state.report.housing_count} listings · ${state.report.status} snapshot · updated ${state.report.generated_at}`;
@@ -244,6 +269,10 @@ async function load() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not load the report");
     state.report = payload;
+    for (const [name, weights] of Object.entries(payload.ranking?.variants || {})) {
+      const option = controls.rankingView.querySelector(`option[value="${name}"]`);
+      if (option) option.textContent = `${name[0].toUpperCase()}${name.slice(1)}: ${Math.round(weights.price_weight * 100)}% price`;
+    }
     const keys = new Set((payload.housing || []).map((item) => item.stable_key));
     state.selected = new Set([...state.selected].filter((key) => keys.has(key)));
     render();
@@ -260,6 +289,7 @@ document.querySelector("#reset").addEventListener("click", () => {
   controls.track.value = "all";
   controls.decision.value = "all";
   controls.maxCost.value = "80000";
+  controls.rankingView.value = "balanced";
   render();
 });
 document.querySelector("#clear-compare").addEventListener("click", () => {

@@ -145,7 +145,13 @@ def main(argv: list[str] | None = None) -> int:
                     if item["classification"] != "excluded"
                     and item["decision_status"] not in {"reserved", "not_interested"}
                 ]
-                result = notify_changes(store, changes, webhook, limit=args.limit)
+                result = notify_changes(
+                    store,
+                    changes,
+                    webhook,
+                    limit=args.limit,
+                    max_attempts=config.runtime.notification_max_attempts,
+                )
             print(
                 json.dumps(
                     result.__dict__

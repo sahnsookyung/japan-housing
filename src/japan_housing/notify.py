@@ -136,13 +136,26 @@ def notify_changes(
     webhook_url: str,
     *,
     limit: int = 20,
+    max_attempts: int = 3,
 ) -> NotificationResult:
     webhook = _with_wait(validate_webhook_url(webhook_url))
     sent = skipped = unknown = failed = 0
+    retryable = store.retryable_notifications(max_attempts=max_attempts)
+    seen = {(str(item.get("stable_key")), str(item.get("fingerprint"))) for item in changes}
     candidates = [item for item in changes if item.get("classification") != "excluded"]
+    candidates.extend(
+        item
+        for item in retryable
+        if (str(item.get("stable_key")), str(item.get("fingerprint"))) not in seen
+    )
     candidates.sort(
         key=lambda item: (
             0 if item.get("classification") == "eligible" else 1,
+            (
+                item["record"].get("priority_score", 10**9)
+                if isinstance(item.get("record"), dict)
+                else 10**9
+            ),
             str(item.get("stable_key")),
         )
     )
@@ -150,7 +163,7 @@ def notify_changes(
         for change in candidates[:limit]:
             stable_key = str(change["stable_key"])
             fingerprint = str(change["fingerprint"])
-            if not store.reserve_notification(stable_key, fingerprint):
+            if not store.reserve_notification(stable_key, fingerprint, max_attempts=max_attempts):
                 skipped += 1
                 continue
             payload = {
@@ -160,7 +173,11 @@ def notify_changes(
             try:
                 response = client.post(webhook, json=payload)
                 if response.status_code == 429:
-                    delay = min(10.0, max(0.25, float(response.headers.get("Retry-After", "1"))))
+                    try:
+                        retry_after = float(response.headers.get("Retry-After", "1"))
+                    except ValueError:
+                        retry_after = 1.0
+                    delay = min(10.0, max(0.25, retry_after))
                     time.sleep(delay)
                     response = client.post(webhook, json=payload)
                 if 200 <= response.status_code < 300:
@@ -173,10 +190,11 @@ def notify_changes(
                     )
                     sent += 1
                 else:
+                    retryable = response.status_code == 429 or response.status_code >= 500
                     store.finish_notification(
                         stable_key,
                         fingerprint,
-                        "failed",
+                        "retryable_failed" if retryable else "failed",
                         error=f"Discord HTTP {response.status_code}",
                     )
                     failed += 1
@@ -197,9 +215,12 @@ def _report_content(payload: dict[str, object]) -> str:
     health = payload.get("source_health")
     health = health if isinstance(health, list) else []
     statuses = [item.get("last_status") for item in health if isinstance(item, dict)]
+    coverage = payload.get("source_coverage")
+    coverage = coverage if isinstance(coverage, list) else []
     updated = _safe(payload.get("generated_at") or "unknown")
     report_status = _safe(payload.get("status") or "unknown")
     unhealthy = sum(value not in {"healthy", "partial"} for value in statuses)
+    partial = statuses.count("partial")
     lines = [
         "📌 **Latest Japan Housing Report**",
         f"Updated: {updated} · status: **{report_status}**",
@@ -207,19 +228,51 @@ def _report_content(payload: dict[str, object]) -> str:
             f"**{int(payload.get('housing_count') or 0):,} listings** · "
             f"{int(counts.get('eligible') or 0)} eligible · {int(counts.get('review') or 0)} review"
         ),
-        f"Sources: {statuses.count('healthy')} healthy · {unhealthy} unhealthy/not run",
+        (
+            f"Sources: {statuses.count('healthy')} healthy · {partial} partial · "
+            f"{unhealthy} unhealthy/not run"
+        ),
+        (
+            "Coverage: "
+            + " · ".join(
+                f"{_safe(item.get('source_id') or '?')} "
+                f"{float(item.get('verified_page_ratio') or 0):.0%}"
+                for item in coverage
+                if isinstance(item, dict)
+            )
+            if coverage
+            else "Coverage: unavailable"
+        ),
         "",
         "**Top candidates**",
     ]
     housing = payload.get("housing")
     housing = housing if isinstance(housing, list) else []
-    selected = [
+    candidates = [
         item
         for item in housing
         if isinstance(item, dict)
         and item.get("classification") != "excluded"
         and item.get("decision_status") not in {"reserved", "not_interested"}
-    ][:5]
+    ]
+    selected = []
+    seen_properties: set[str] = set()
+    for item in candidates:
+        property_key = str(
+            item.get("property_name") or item.get("cluster_key") or item.get("stable_key")
+        )
+        if property_key in seen_properties:
+            continue
+        seen_properties.add(property_key)
+        selected.append(item)
+        if len(selected) == 5:
+            break
+    if len(selected) < 5:
+        selected_keys = {str(item.get("stable_key")) for item in selected}
+        selected.extend(
+            item for item in candidates if str(item.get("stable_key")) not in selected_keys
+        )
+        selected = selected[:5]
     if not selected:
         lines.append("No actionable candidates in this snapshot.")
     for item in selected:
@@ -309,6 +362,14 @@ def sync_latest_report_message(
                 )
                 return ReportMessageResult("updated", message_id)
             if response.status_code != 404:
+                store.save_discord_report_message(
+                    webhook_id=webhook_id,
+                    message_id=message_id,
+                    channel_id=str(current["channel_id"]),
+                    run_id=run_id,
+                    status="failed",
+                    error=f"Discord HTTP {response.status_code}",
+                )
                 return ReportMessageResult("failed", message_id)
         try:
             response = _send_report(client, "POST", _with_wait(webhook), payload, report_path)
@@ -323,6 +384,14 @@ def sync_latest_report_message(
             )
             return ReportMessageResult("delivery_unknown", "")
         if not 200 <= response.status_code < 300:
+            store.save_discord_report_message(
+                webhook_id=webhook_id,
+                message_id="",
+                channel_id="",
+                run_id=run_id,
+                status="failed",
+                error=f"Discord HTTP {response.status_code}",
+            )
             return ReportMessageResult("failed", "")
         try:
             body = response.json()

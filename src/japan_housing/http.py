@@ -6,7 +6,7 @@ import email.utils
 import random
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
@@ -49,6 +49,14 @@ class HttpMetrics:
     bytes_downloaded: int = 0
     retries: int = 0
     failures: int = 0
+    circuit_openings: int = 0
+    requests_by_host: dict[str, int] = field(default_factory=dict)
+    bytes_by_host: dict[str, int] = field(default_factory=dict)
+    retries_by_host: dict[str, int] = field(default_factory=dict)
+    failures_by_host: dict[str, int] = field(default_factory=dict)
+    circuit_by_host: dict[str, int] = field(default_factory=dict)
+    durations_by_host: dict[str, list[float]] = field(default_factory=dict)
+    statuses_by_host: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 class BoundedHttpClient:
@@ -113,11 +121,16 @@ class BoundedHttpClient:
             start_lock = self._host_start_locks.setdefault(host, threading.Lock())
         return slot, start_lock
 
-    def _reserve_budget(self) -> None:
+    @staticmethod
+    def _increment(values: dict[str, int], key: str) -> None:
+        values[key] = values.get(key, 0) + 1
+
+    def _reserve_budget(self, host: str) -> None:
         with self._lock:
             if self.metrics.requests >= self.config.request_budget_per_run:
                 raise BudgetExhausted("global request budget exhausted")
             self.metrics.requests += 1
+            self._increment(self.metrics.requests_by_host, host)
 
     def _wait_for_host(self, host: str, start_lock: threading.Lock) -> None:
         with start_lock:
@@ -125,6 +138,9 @@ class BoundedHttpClient:
                 failures = self._consecutive_failures.get(host, 0)
                 last = self._last_start.get(host, 0.0)
             if failures >= self.config.circuit_failure_threshold:
+                with self._lock:
+                    self.metrics.circuit_openings += 1
+                    self._increment(self.metrics.circuit_by_host, host)
                 raise CircuitOpen(f"circuit open for {host}")
             delay = self.config.per_host_interval_seconds - (time.monotonic() - last)
             if delay > 0:
@@ -172,13 +188,47 @@ class BoundedHttpClient:
         with self._lock:
             self._consecutive_failures[host] = 0
             self.metrics.bytes_downloaded += size
+            self.metrics.bytes_by_host[host] = self.metrics.bytes_by_host.get(host, 0) + size
 
     def _failure(self, host: str) -> None:
         with self._lock:
             self._consecutive_failures[host] = self._consecutive_failures.get(host, 0) + 1
             self.metrics.failures += 1
+            self._increment(self.metrics.failures_by_host, host)
 
-    def get(self, url: str, *, allowed_hosts: frozenset[str]) -> HttpResponse:
+    def _record_response(self, host: str, status: int | str, elapsed: float) -> None:
+        with self._lock:
+            self.metrics.durations_by_host.setdefault(host, []).append(elapsed)
+            statuses = self.metrics.statuses_by_host.setdefault(host, {})
+            key = str(status)
+            statuses[key] = statuses.get(key, 0) + 1
+
+    def snapshot(self, hosts: frozenset[str]) -> dict[str, object]:
+        with self._lock:
+            durations = [
+                value for host in hosts for value in self.metrics.durations_by_host.get(host, ())
+            ]
+            statuses: dict[str, int] = {}
+            for host in hosts:
+                for status, count in self.metrics.statuses_by_host.get(host, {}).items():
+                    statuses[status] = statuses.get(status, 0) + count
+            return {
+                "requests": sum(self.metrics.requests_by_host.get(host, 0) for host in hosts),
+                "bytes": sum(self.metrics.bytes_by_host.get(host, 0) for host in hosts),
+                "retries": sum(self.metrics.retries_by_host.get(host, 0) for host in hosts),
+                "failures": sum(self.metrics.failures_by_host.get(host, 0) for host in hosts),
+                "circuits": sum(self.metrics.circuit_by_host.get(host, 0) for host in hosts),
+                "durations": tuple(durations),
+                "statuses": statuses,
+            }
+
+    def get(
+        self,
+        url: str,
+        *,
+        allowed_hosts: frozenset[str],
+        request_headers: dict[str, str] | None = None,
+    ) -> HttpResponse:
         current = url
         redirects = 0
         while True:
@@ -187,25 +237,43 @@ class BoundedHttpClient:
             for attempt in range(1, self.config.max_attempts + 1):
                 response_for_delay: httpx.Response | None = None
                 try:
-                    self._reserve_budget()
+                    self._reserve_budget(host)
+                    should_retry = False
                     with self._global_slots, host_slot:
                         self._wait_for_host(host, start_lock)
-                        with self._client.stream("GET", current) as response:
-                            response_for_delay = response
-                            status = response.status_code
-                            if (
-                                status in {408, 429} or 500 <= status <= 599
-                            ) and attempt < self.config.max_attempts:
-                                with self._lock:
-                                    self.metrics.retries += 1
-                                time.sleep(self._retry_delay(response, attempt))
-                                continue
-                            body, text = self._read_response(response)
-                            headers = {
-                                key.lower(): value for key, value in response.headers.items()
-                            }
+                        request_started = time.perf_counter()
+                        status: int | str = "transport_error"
+                        try:
+                            with self._client.stream(
+                                "GET", current, headers=request_headers
+                            ) as response:
+                                response_for_delay = response
+                                status = response.status_code
+                                response_headers = {
+                                    key.lower(): value for key, value in response.headers.items()
+                                }
+                                should_retry = (
+                                    status in {408, 429} or 500 <= status <= 599
+                                ) and attempt < self.config.max_attempts
+                                if should_retry:
+                                    body, text = b"", ""
+                                else:
+                                    body, text = self._read_response(response)
+                        finally:
+                            self._record_response(
+                                host, status, time.perf_counter() - request_started
+                            )
+                    if should_retry:
+                        with self._lock:
+                            self.metrics.retries += 1
+                            self._increment(self.metrics.retries_by_host, host)
+                        time.sleep(self._retry_delay(response_for_delay, attempt))
+                        continue
+                    if status == 304:
+                        self._success(host, 0)
+                        return HttpResponse(current, status, text, 0, response_headers)
                     if 300 <= status < 400:
-                        location = headers.get("location")
+                        location = response_headers.get("location")
                         if not location:
                             raise HttpFailure("redirect without Location", status_code=status)
                         redirects += 1
@@ -217,13 +285,14 @@ class BoundedHttpClient:
                     if status >= 400 and status != 404:
                         raise HttpFailure(f"HTTP {status} for {current}", status_code=status)
                     self._success(host, len(body))
-                    return HttpResponse(current, status, text, len(body), headers)
+                    return HttpResponse(current, status, text, len(body), response_headers)
                 except BudgetExhausted:
                     raise
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     if attempt < self.config.max_attempts:
                         with self._lock:
                             self.metrics.retries += 1
+                            self._increment(self.metrics.retries_by_host, host)
                         time.sleep(self._retry_delay(response_for_delay, attempt))
                         continue
                     self._failure(host)

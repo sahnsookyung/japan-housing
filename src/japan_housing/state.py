@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .geography import validate_coordinates
 from .models import Classification, HousingRecord, ListingRef, SourceMetrics, iso_now
 from .sources import SourceSpec
 
@@ -19,6 +21,8 @@ class CachedPage:
     fetched_at: datetime
     records: tuple[HousingRecord, ...]
     classifications: tuple[str, ...]
+    etag: str = ""
+    last_modified: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +52,11 @@ def _classification_payload(value: Classification) -> dict[str, Any]:
         "priority_distance_component": value.priority_distance_component,
         "distance_to_anchor_km": value.distance_to_anchor_km,
         "ranking_price_yen": value.ranking_price_yen,
+        "ranking_price_basis": value.ranking_price_basis,
+        "priority_closer_score": value.priority_closer_score,
+        "priority_cheaper_score": value.priority_cheaper_score,
+        "policy_version": value.policy_version,
+        "policy_config_hash": value.policy_config_hash,
         "landing_30": scenario(value.landing_30),
         "landing_60": scenario(value.landing_60),
         "landing_90": scenario(value.landing_90),
@@ -59,7 +68,7 @@ class StateStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self.connection = sqlite3.connect(path, timeout=5.0)
+        self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
@@ -116,6 +125,17 @@ class StateStore:
                 fetched_at TEXT NOT NULL,
                 records_json TEXT NOT NULL,
                 classifications_json TEXT NOT NULL,
+                etag TEXT NOT NULL DEFAULT '',
+                last_modified TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (source_id, page_external_id)
+            );
+            CREATE TABLE IF NOT EXISTS detail_attempts (
+                source_id TEXT NOT NULL,
+                page_external_id TEXT NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_status TEXT NOT NULL,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                retry_after_at TEXT,
                 PRIMARY KEY (source_id, page_external_id)
             );
             CREATE TABLE IF NOT EXISTS staged_records (
@@ -158,6 +178,8 @@ class StateStore:
                 sent_at TEXT,
                 message_id TEXT NOT NULL DEFAULT '',
                 last_error TEXT NOT NULL DEFAULT '',
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                next_attempt_at TEXT,
                 PRIMARY KEY (stable_key, record_fingerprint)
             );
             CREATE TABLE IF NOT EXISTS discord_report_message (
@@ -171,7 +193,19 @@ class StateStore:
             );
             """
         )
+        self._ensure_column("detail_cache", "etag", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("detail_cache", "last_modified", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("notifications", "attempt_count", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("notifications", "next_attempt_at", "TEXT")
         self.connection.commit()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing:
+            self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def ensure_sources(self, specs: tuple[SourceSpec, ...]) -> None:
         with self.connection:
@@ -194,7 +228,13 @@ class StateStore:
                     ),
                 )
 
-    def source_due(self, spec: SourceSpec, *, force: bool = False) -> bool:
+    def source_due(
+        self,
+        spec: SourceSpec,
+        *,
+        force: bool = False,
+        partial_retry_minutes: int = 60,
+    ) -> bool:
         if force:
             return True
         row = self.connection.execute(
@@ -202,9 +242,12 @@ class StateStore:
         ).fetchone()
         if not row or not row["last_run_at"] or row["last_status"] not in {"healthy", "partial"}:
             return True
-        return datetime.now().astimezone() - datetime.fromisoformat(
-            row["last_run_at"]
-        ) >= timedelta(hours=spec.interval_hours)
+        interval = (
+            timedelta(minutes=partial_retry_minutes)
+            if row["last_status"] == "partial"
+            else timedelta(hours=spec.interval_hours)
+        )
+        return datetime.now().astimezone() - datetime.fromisoformat(row["last_run_at"]) >= interval
 
     def begin_source_run(self, run_id: str, source_id: str) -> None:
         with self.connection:
@@ -280,7 +323,8 @@ class StateStore:
     def lookup_cache(self, ref: ListingRef) -> CachedPage | None:
         row = self.connection.execute(
             """
-            SELECT list_fingerprint, fetched_at, records_json, classifications_json
+            SELECT list_fingerprint, fetched_at, records_json, classifications_json,
+                   etag, last_modified
             FROM detail_cache WHERE source_id=? AND page_external_id=?
             """,
             (ref.source_id, ref.external_id),
@@ -292,6 +336,8 @@ class StateStore:
             datetime.fromisoformat(row["fetched_at"]),
             tuple(HousingRecord.from_dict(item) for item in json.loads(row["records_json"])),
             tuple(json.loads(row["classifications_json"])),
+            str(row["etag"] or ""),
+            str(row["last_modified"] or ""),
         )
 
     def cache_page(
@@ -299,19 +345,24 @@ class StateStore:
         ref: ListingRef,
         records: list[HousingRecord],
         classifications: list[Classification],
+        *,
+        etag: str = "",
+        last_modified: str = "",
     ) -> None:
         with self.connection:
             self.connection.execute(
                 """
                 INSERT INTO detail_cache(
                     source_id, page_external_id, list_fingerprint, fetched_at,
-                    records_json, classifications_json
-                ) VALUES(?, ?, ?, ?, ?, ?)
+                    records_json, classifications_json, etag, last_modified
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id, page_external_id) DO UPDATE SET
                     list_fingerprint=excluded.list_fingerprint,
                     fetched_at=excluded.fetched_at,
                     records_json=excluded.records_json,
-                    classifications_json=excluded.classifications_json
+                    classifications_json=excluded.classifications_json,
+                    etag=excluded.etag,
+                    last_modified=excluded.last_modified
                 """,
                 (
                     ref.source_id,
@@ -320,6 +371,84 @@ class StateStore:
                     iso_now(),
                     json.dumps([record.to_dict() for record in records], ensure_ascii=False),
                     json.dumps([item.name for item in classifications]),
+                    etag,
+                    last_modified,
+                ),
+            )
+
+    def detail_attempt_due(self, ref: ListingRef) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT retry_after_at FROM detail_attempts
+            WHERE source_id=? AND page_external_id=?
+            """,
+            (ref.source_id, ref.external_id),
+        ).fetchone()
+        return (
+            not row
+            or not row["retry_after_at"]
+            or datetime.fromisoformat(row["retry_after_at"]) <= datetime.now().astimezone()
+        )
+
+    def order_detail_refs(
+        self,
+        refs: Iterable[ListingRef],
+        caches: dict[str, CachedPage | None],
+    ) -> list[ListingRef]:
+        values = list(refs)
+        attempts = {
+            str(row["page_external_id"]): row
+            for row in self.connection.execute(
+                "SELECT * FROM detail_attempts WHERE source_id=?",
+                (values[0].source_id if values else "",),
+            ).fetchall()
+        }
+
+        def key(ref: ListingRef) -> tuple[object, ...]:
+            cache = caches.get(ref.external_id)
+            attempt = attempts.get(ref.external_id)
+            if cache is None and attempt is None:
+                return (0, "", ref.external_id)
+            if cache is None:
+                return (1, str(attempt["last_attempt_at"]), ref.external_id)
+            return (2, cache.fetched_at.isoformat(), ref.external_id)
+
+        return sorted(values, key=key)
+
+    def record_detail_attempt(self, ref: ListingRef, status: str) -> None:
+        now = datetime.now().astimezone()
+        row = self.connection.execute(
+            """
+            SELECT failure_count FROM detail_attempts
+            WHERE source_id=? AND page_external_id=?
+            """,
+            (ref.source_id, ref.external_id),
+        ).fetchone()
+        failed = status in {"failure", "parse_failure"}
+        failures = (int(row["failure_count"]) if row else 0) + 1 if failed else 0
+        retry_after = (
+            (now + timedelta(hours=min(24, 2 ** (failures - 1)))).isoformat() if failed else None
+        )
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO detail_attempts(
+                    source_id, page_external_id, last_attempt_at, last_status,
+                    failure_count, retry_after_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, page_external_id) DO UPDATE SET
+                    last_attempt_at=excluded.last_attempt_at,
+                    last_status=excluded.last_status,
+                    failure_count=excluded.failure_count,
+                    retry_after_at=excluded.retry_after_at
+                """,
+                (
+                    ref.source_id,
+                    ref.external_id,
+                    now.isoformat(),
+                    status,
+                    failures,
+                    retry_after,
                 ),
             )
 
@@ -330,24 +459,37 @@ class StateStore:
         record: HousingRecord,
         classification: Classification,
     ) -> None:
+        self.stage_many(run_id, ((page_external_id, record, classification),))
+
+    def stage_many(
+        self,
+        run_id: str,
+        values: Iterable[tuple[str, HousingRecord, Classification]],
+    ) -> None:
+        rows = [
+            (
+                run_id,
+                record.source_id,
+                record.stable_key,
+                page_external_id,
+                json.dumps(record.to_dict(), ensure_ascii=False),
+                classification.name,
+                json.dumps(_classification_payload(classification), ensure_ascii=False),
+                record.fingerprint(),
+            )
+            for page_external_id, record, classification in values
+        ]
+        if not rows:
+            return
         with self.connection:
-            self.connection.execute(
+            self.connection.executemany(
                 """
                 INSERT OR REPLACE INTO staged_records(
                     run_id, source_id, stable_key, page_external_id, record_json,
                     classification, classification_json, fingerprint
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    run_id,
-                    record.source_id,
-                    record.stable_key,
-                    page_external_id,
-                    json.dumps(record.to_dict(), ensure_ascii=False),
-                    classification.name,
-                    json.dumps(_classification_payload(classification), ensure_ascii=False),
-                    record.fingerprint(),
-                ),
+                rows,
             )
 
     def discard_staged(self, run_id: str, source_id: str) -> None:
@@ -432,13 +574,15 @@ class StateStore:
                     ),
                 )
                 if change_type:
+                    changed_record = json.loads(row["record_json"])
+                    changed_record.update(json.loads(row["classification_json"]))
                     changes.append(
                         {
                             "type": change_type,
                             "stable_key": row["stable_key"],
                             "fingerprint": row["fingerprint"],
                             "classification": row["classification"],
-                            "record": json.loads(row["record_json"]),
+                            "record": changed_record,
                         }
                     )
             if spec.authoritative_disappearance and complete:
@@ -494,10 +638,113 @@ class StateStore:
             result.append(item)
         return result
 
+    def reclassify_active(self, profile: object, ranking: object) -> int:
+        """Refresh derived policy data when configuration or policy code changes."""
+
+        from .policy import POLICY_VERSION, classify, policy_config_hash
+
+        target_hash = policy_config_hash(profile, ranking)
+        rows = self.connection.execute(
+            """
+            SELECT stable_key, record_json, classification_json
+            FROM records WHERE active=1
+            """
+        ).fetchall()
+        updates: list[tuple[str, str, str, str, str]] = []
+        for row in rows:
+            record = HousingRecord.from_dict(json.loads(row["record_json"]))
+            latitude, longitude, coordinate_basis = validate_coordinates(
+                record.latitude,
+                record.longitude,
+                record.coordinate_basis,
+                record.prefecture,
+            )
+            record_changed = (
+                latitude != record.latitude
+                or longitude != record.longitude
+                or coordinate_basis != record.coordinate_basis
+            )
+            if record_changed:
+                record.latitude = latitude
+                record.longitude = longitude
+                record.coordinate_basis = coordinate_basis
+            try:
+                current = json.loads(row["classification_json"])
+            except (TypeError, json.JSONDecodeError):
+                current = {}
+            if (
+                not record_changed
+                and current.get("policy_version") == POLICY_VERSION
+                and current.get("policy_config_hash") == target_hash
+            ):
+                continue
+            outcome = classify(record, profile, ranking)
+            updates.append(
+                (
+                    outcome.name,
+                    json.dumps(_classification_payload(outcome), ensure_ascii=False),
+                    json.dumps(record.to_dict(), ensure_ascii=False),
+                    record.fingerprint(),
+                    str(row["stable_key"]),
+                )
+            )
+        if updates:
+            with self.connection:
+                self.connection.executemany(
+                    """
+                    UPDATE records SET classification=?, classification_json=?,
+                        record_json=?, fingerprint=?
+                    WHERE stable_key=?
+                    """,
+                    updates,
+                )
+        return len(updates)
+
     def source_health(self) -> list[dict[str, Any]]:
         return [
             dict(row) for row in self.connection.execute("SELECT * FROM sources ORDER BY source_id")
         ]
+
+    def source_coverage(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        now = datetime.now().astimezone()
+        for source in self.source_health():
+            source_id = str(source["source_id"])
+            cached_pages = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM detail_cache WHERE source_id=?", (source_id,)
+                ).fetchone()[0]
+            )
+            active = self.connection.execute(
+                """
+                SELECT COUNT(*) records, COUNT(DISTINCT page_external_id) pages
+                FROM records WHERE source_id=? AND active=1
+                """,
+                (source_id,),
+            ).fetchone()
+            discovered = int(source.get("last_discovered") or 0)
+            last_run_at = str(source.get("last_run_at") or "")
+            age_hours = None
+            if last_run_at:
+                age_hours = round(
+                    (now - datetime.fromisoformat(last_run_at)).total_seconds() / 3600,
+                    2,
+                )
+            result.append(
+                {
+                    "source_id": source_id,
+                    "status": source.get("last_status") or "not_run",
+                    "discovered_pages": discovered,
+                    "cached_pages": cached_pages,
+                    "active_pages": int(active["pages"] or 0),
+                    "active_records": int(active["records"] or 0),
+                    "verified_page_ratio": (
+                        round(min(1.0, cached_pages / discovered), 4) if discovered else 0.0
+                    ),
+                    "last_run_age_hours": age_hours,
+                }
+            )
+        return result
 
     def healthy_discovery_counts(self, source_id: str, limit: int = 3) -> list[int]:
         rows = self.connection.execute(
@@ -538,7 +785,14 @@ class StateStore:
                 (stable_key, status, note, iso_now()),
             )
 
-    def reserve_notification(self, stable_key: str, fingerprint: str) -> bool:
+    def reserve_notification(
+        self,
+        stable_key: str,
+        fingerprint: str,
+        *,
+        max_attempts: int = 3,
+    ) -> bool:
+        now = datetime.now().astimezone()
         try:
             with self.connection:
                 self.connection.execute(
@@ -546,11 +800,34 @@ class StateStore:
                     INSERT INTO notifications(stable_key, record_fingerprint, status, reserved_at)
                     VALUES(?, ?, 'reserved', ?)
                     """,
-                    (stable_key, fingerprint, iso_now()),
+                    (stable_key, fingerprint, now.isoformat()),
                 )
             return True
         except sqlite3.IntegrityError:
-            return False
+            row = self.connection.execute(
+                """
+                SELECT status, attempt_count, next_attempt_at FROM notifications
+                WHERE stable_key=? AND record_fingerprint=?
+                """,
+                (stable_key, fingerprint),
+            ).fetchone()
+            if (
+                not row
+                or row["status"] != "retryable_failed"
+                or int(row["attempt_count"]) >= max_attempts
+                or (row["next_attempt_at"] and datetime.fromisoformat(row["next_attempt_at"]) > now)
+            ):
+                return False
+            with self.connection:
+                self.connection.execute(
+                    """
+                    UPDATE notifications SET status='reserved', reserved_at=?,
+                        attempt_count=attempt_count+1, next_attempt_at=NULL
+                    WHERE stable_key=? AND record_fingerprint=?
+                    """,
+                    (now.isoformat(), stable_key, fingerprint),
+                )
+            return True
 
     def finish_notification(
         self,
@@ -564,7 +841,8 @@ class StateStore:
         with self.connection:
             self.connection.execute(
                 """
-                UPDATE notifications SET status=?, sent_at=?, message_id=?, last_error=?
+                UPDATE notifications SET status=?, sent_at=?, message_id=?, last_error=?,
+                    next_attempt_at=?
                 WHERE stable_key=? AND record_fingerprint=?
                 """,
                 (
@@ -572,6 +850,11 @@ class StateStore:
                     iso_now() if status == "sent" else None,
                     message_id,
                     error,
+                    (
+                        (datetime.now().astimezone() + timedelta(hours=1)).isoformat()
+                        if status == "retryable_failed"
+                        else None
+                    ),
                     stable_key,
                     fingerprint,
                 ),
@@ -587,6 +870,35 @@ class StateStore:
                 """
             )
         ]
+
+    def retryable_notifications(self, *, max_attempts: int = 3) -> list[dict[str, Any]]:
+        now = iso_now()
+        rows = self.connection.execute(
+            """
+            SELECT n.stable_key, n.record_fingerprint, r.record_json,
+                   r.classification, r.classification_json
+            FROM notifications n JOIN records r USING(stable_key)
+            WHERE n.status='retryable_failed' AND n.attempt_count < ?
+              AND (n.next_attempt_at IS NULL OR n.next_attempt_at <= ?)
+              AND r.active=1 AND r.fingerprint=n.record_fingerprint
+            ORDER BY n.reserved_at
+            """,
+            (max_attempts, now),
+        ).fetchall()
+        result = []
+        for row in rows:
+            record = json.loads(row["record_json"])
+            record.update(json.loads(row["classification_json"]))
+            result.append(
+                {
+                    "type": "retry",
+                    "stable_key": row["stable_key"],
+                    "fingerprint": row["record_fingerprint"],
+                    "classification": row["classification"],
+                    "record": record,
+                }
+            )
+        return result
 
     def discord_report_message(self) -> dict[str, Any] | None:
         row = self.connection.execute(
@@ -625,6 +937,61 @@ class StateStore:
         cutoff = (datetime.now().astimezone() - timedelta(days=days)).isoformat()
         with self.connection:
             self.connection.execute(
-                "DELETE FROM notifications WHERE reserved_at < ? AND status IN ('sent', 'failed')",
+                """
+                DELETE FROM notifications WHERE reserved_at < ?
+                AND status IN ('sent', 'failed', 'retryable_failed')
+                """,
+                (cutoff,),
+            )
+            old_runs = self.connection.execute(
+                """
+                SELECT run_id FROM source_runs
+                WHERE COALESCE(finished_at, started_at) < ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in old_runs:
+                self.connection.execute(
+                    "DELETE FROM staged_records WHERE run_id=?", (row["run_id"],)
+                )
+            self.connection.execute(
+                "DELETE FROM source_runs WHERE COALESCE(finished_at, started_at) < ?", (cutoff,)
+            )
+            self.connection.execute(
+                """
+                DELETE FROM staged_records
+                WHERE run_id NOT IN (SELECT run_id FROM source_runs)
+                """
+            )
+            self.connection.execute(
+                """
+                DELETE FROM detail_cache
+                WHERE fetched_at < ? AND NOT EXISTS (
+                    SELECT 1 FROM records r
+                    WHERE r.source_id=detail_cache.source_id
+                    AND r.page_external_id=detail_cache.page_external_id
+                    AND r.active=1
+                )
+                """,
+                (cutoff,),
+            )
+            self.connection.execute(
+                """
+                DELETE FROM detail_attempts
+                WHERE last_attempt_at < ? AND NOT EXISTS (
+                    SELECT 1 FROM detail_cache c
+                    WHERE c.source_id=detail_attempts.source_id
+                    AND c.page_external_id=detail_attempts.page_external_id
+                )
+                """,
+                (cutoff,),
+            )
+            self.connection.execute(
+                """
+                DELETE FROM records
+                WHERE active=0 AND last_seen_at < ? AND NOT EXISTS (
+                    SELECT 1 FROM decisions d WHERE d.stable_key=records.stable_key
+                )
+                """,
                 (cutoff,),
             )

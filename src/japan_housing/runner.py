@@ -31,8 +31,8 @@ from .notify import (
 )
 from .parsing import normalize_records
 from .policy import classify
-from .report import PublishedReport, build_report_payload, publish_report
-from .sources import SourceAdapter, build_adapters, source_specs
+from .report import PublishedReport, build_report_payload, prune_reports, publish_report
+from .sources import SourceAdapter, SourceSpec, build_adapters, source_specs
 from .state import CachedPage, StateStore
 
 T = TypeVar("T")
@@ -47,6 +47,14 @@ class RunOutcome:
     source_results: tuple[SourceRunResult, ...]
     notification: NotificationResult | None
     report_message: ReportMessageResult | None
+
+
+@dataclass(frozen=True, slots=True)
+class DetailResult:
+    records: tuple[HousingRecord, ...]
+    status: str
+    etag: str = ""
+    last_modified: str = ""
 
 
 def _run_id(prefix: str = "run") -> str:
@@ -111,7 +119,7 @@ def _stage_records(
     records: Iterable[HousingRecord],
     config: AppConfig,
 ) -> int:
-    count = 0
+    staged: list[tuple[str, HousingRecord, Classification]] = []
     for record in records:
         if record.latitude is None and ref.latitude is not None:
             record.latitude = ref.latitude
@@ -125,9 +133,41 @@ def _stage_records(
             record.coordinate_basis = "provider_list_geo"
         record.schema_version = HOUSING_RECORD_SCHEMA_VERSION
         result = classify(record, config.profile, config.ranking)
-        store.stage(run_id, ref.external_id, record, result)
-        count += 1
-    return count
+        staged.append((ref.external_id, record, result))
+    store.stage_many(run_id, staged)
+    return len(staged)
+
+
+def _percentile(values: tuple[float, ...], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * percentile) - 1))
+    return ordered[index]
+
+
+def _apply_http_metrics(
+    metrics: SourceMetrics,
+    before: dict[str, object],
+    client: BoundedHttpClient,
+    hosts: frozenset[str],
+) -> None:
+    after = client.snapshot(hosts)
+    durations = tuple(after["durations"])[len(tuple(before["durations"])) :]
+    metrics.requests = int(after["requests"]) - int(before["requests"])
+    metrics.bytes_downloaded = int(after["bytes"]) - int(before["bytes"])
+    metrics.retries = int(after["retries"]) - int(before["retries"])
+    metrics.http_failures = int(after["failures"]) - int(before["failures"])
+    metrics.circuit_openings = int(after["circuits"]) - int(before["circuits"])
+    metrics.latency_p50_ms = round(_percentile(durations, 0.50) * 1000, 2)
+    metrics.latency_p95_ms = round(_percentile(durations, 0.95) * 1000, 2)
+    metrics.latency_max_ms = round(max(durations, default=0.0) * 1000, 2)
+    before_statuses = before["statuses"]
+    metrics.http_status_counts = {
+        key: int(value) - int(before_statuses.get(key, 0))
+        for key, value in after["statuses"].items()
+        if int(value) - int(before_statuses.get(key, 0))
+    }
 
 
 def _run_source(
@@ -140,9 +180,7 @@ def _run_source(
     spec = adapter.spec
     started = time.perf_counter()
     metrics = SourceMetrics()
-    before_requests = client.metrics.requests
-    before_bytes = client.metrics.bytes_downloaded
-    before_retries = client.metrics.retries
+    before_http = client.snapshot(spec.allowed_hosts)
     store.begin_source_run(run_id, spec.source_id)
     staged_count = 0
     changes: list[dict[str, object]] = []
@@ -157,9 +195,12 @@ def _run_source(
             raise ValueError("configured public entry pages produced no listing IDs")
 
         cache_by_id = {ref.external_id: store.lookup_cache(ref) for ref in refs}
-        network_refs = [
+        invalid_refs = [
             ref for ref in refs if not _cache_reusable(ref, cache_by_id[ref.external_id])
         ]
+        retryable_refs = [ref for ref in invalid_refs if store.detail_attempt_due(ref)]
+        metrics.detail_deferred = len(invalid_refs) - len(retryable_refs)
+        network_refs = store.order_detail_refs(retryable_refs, cache_by_id)
         metrics.detail_candidates = len(network_refs)
         source_detail_budget = min(
             config.runtime.detail_budget_per_source,
@@ -175,47 +216,90 @@ def _run_source(
                 staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 metrics.detail_cache_hits += 1
 
-        def fetch(ref: ListingRef) -> list[HousingRecord] | None:
-            document = adapter.fetch_detail(ref)
-            if document is None:
-                return None
-            return normalize_records(ref, spec.label, document)
+        def fetch(ref: ListingRef) -> DetailResult:
+            cache = cache_by_id[ref.external_id]
+            validators_are_compatible = bool(cache) and all(
+                record.schema_version == HOUSING_RECORD_SCHEMA_VERSION for record in cache.records
+            )
+            response = adapter.fetch_detail(
+                ref,
+                etag=cache.etag if cache and validators_are_compatible else "",
+                last_modified=(cache.last_modified if cache and validators_are_compatible else ""),
+            )
+            if response.status_code == 404:
+                return DetailResult((), "missing")
+            etag = response.headers.get("etag", "")
+            last_modified = response.headers.get("last-modified", "")
+            if response.status_code == 304:
+                if cache is None:
+                    raise ValueError("source returned 304 without a cached record")
+                return DetailResult(
+                    cache.records,
+                    "not_modified",
+                    etag or cache.etag,
+                    last_modified or cache.last_modified,
+                )
+            return DetailResult(
+                tuple(normalize_records(ref, spec.label, response.text)),
+                "fresh",
+                etag,
+                last_modified,
+            )
 
         processed: set[str] = set()
         verified_pages: set[str] = set()
         for ref, result in _bounded_map(
             fetch,
             capped_refs,
-            workers=config.runtime.global_workers,
-            max_queued=config.runtime.max_queued_tasks,
+            workers=config.runtime.per_host_workers,
+            max_queued=max(config.runtime.per_host_workers, config.runtime.per_host_workers * 2),
         ):
             processed.add(ref.external_id)
             metrics.detail_network += 1
             cache = cache_by_id[ref.external_id]
             if isinstance(result, Exception):
                 metrics.parse_failures += 1
+                store.record_detail_attempt(ref, "failure")
                 if cache:
                     staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
-            if result is None or (not result and spec.source_id == "oakhouse"):
+            if result.status == "missing" or (not result.records and spec.source_id == "oakhouse"):
                 verified_pages.add(ref.external_id)
                 metrics.explicit_closed += 1
-                store.cache_page(ref, [], [])
+                store.record_detail_attempt(ref, "missing")
+                store.cache_page(
+                    ref,
+                    [],
+                    [],
+                    etag=result.etag,
+                    last_modified=result.last_modified,
+                )
                 continue
-            if not result:
+            if not result.records:
                 metrics.parse_failures += 1
+                store.record_detail_attempt(ref, "parse_failure")
                 if cache:
                     staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
             classifications: list[Classification] = []
             verified_pages.add(ref.external_id)
-            for record in result:
+            staged: list[tuple[str, HousingRecord, Classification]] = []
+            for record in result.records:
                 outcome = classify(record, config.profile, config.ranking)
                 classifications.append(outcome)
-                store.stage(run_id, ref.external_id, record, outcome)
+                staged.append((ref.external_id, record, outcome))
                 staged_count += 1
-            store.cache_page(ref, result, classifications)
-            metrics.parsed += len(result)
+            store.stage_many(run_id, staged)
+            store.cache_page(
+                ref,
+                list(result.records),
+                classifications,
+                etag=result.etag,
+                last_modified=result.last_modified,
+            )
+            store.record_detail_attempt(ref, result.status)
+            metrics.detail_not_modified += int(result.status == "not_modified")
+            metrics.parsed += len(result.records)
             if metrics.detail_network % config.runtime.checkpoint_every == 0:
                 store.checkpoint()
 
@@ -229,9 +313,14 @@ def _run_source(
 
         status = "healthy"
         error = ""
-        if not batch.complete or detail_budget_exhausted:
+        if not batch.complete or detail_budget_exhausted or metrics.detail_deferred:
             status = "partial"
-            error = "source budget exhausted; cached progress will resume on a later run"
+            reasons = []
+            if not batch.complete or detail_budget_exhausted:
+                reasons.append("source budget exhausted")
+            if metrics.detail_deferred:
+                reasons.append(f"{metrics.detail_deferred} detail retries are in backoff")
+            error = "; ".join(reasons) + "; cached progress will resume automatically"
         failure_limit = max(3, math.ceil(max(1, metrics.detail_network) * 0.05))
         if metrics.parse_failures > failure_limit:
             status = "drifted"
@@ -262,9 +351,15 @@ def _run_source(
         else:
             store.discard_staged(run_id, spec.source_id)
         metrics.elapsed_seconds = round(time.perf_counter() - started, 4)
-        metrics.requests = client.metrics.requests - before_requests
-        metrics.bytes_downloaded = client.metrics.bytes_downloaded - before_bytes
-        metrics.retries = client.metrics.retries - before_retries
+        _apply_http_metrics(metrics, before_http, client, spec.allowed_hosts)
+        detail_total = metrics.detail_cache_hits + metrics.detail_network
+        metrics.cache_hit_ratio = round(
+            metrics.detail_cache_hits / detail_total if detail_total else 1.0, 4
+        )
+        metrics.verified_coverage_ratio = round(
+            min(1.0, (metrics.detail_cache_hits + len(verified_pages)) / metrics.discovered),
+            4,
+        )
         store.finish_source_run(run_id, spec.source_id, status, metrics, error)
         return SourceRunResult(run_id, spec.source_id, status, metrics, error, changes)
     except BudgetExhausted as exc:
@@ -284,9 +379,7 @@ def _run_source(
         error = f"{type(exc).__name__}: {exc}"
         store.discard_staged(run_id, spec.source_id)
     metrics.elapsed_seconds = round(time.perf_counter() - started, 4)
-    metrics.requests = client.metrics.requests - before_requests
-    metrics.bytes_downloaded = client.metrics.bytes_downloaded - before_bytes
-    metrics.retries = client.metrics.retries - before_retries
+    _apply_http_metrics(metrics, before_http, client, spec.allowed_hosts)
     store.finish_source_run(run_id, spec.source_id, status, metrics, error)
     return SourceRunResult(run_id, spec.source_id, status, metrics, error, changes)
 
@@ -310,15 +403,40 @@ def run_refresh(
     selected = tuple(spec for spec in specs if source_ids is None or spec.source_id in source_ids)
     with StateStore(config.runtime.state_path) as store:
         store.ensure_sources(specs)
-        due = [spec for spec in selected if store.source_due(spec, force=force)]
-        results: list[SourceRunResult] = []
-        changes: list[dict[str, object]] = []
-        with BoundedHttpClient(config.runtime) as client:
-            adapters = {adapter.spec.source_id: adapter for adapter in build_adapters(client)}
-            for spec in due:
-                result = _run_source(adapters[spec.source_id], store, config, run_id, client)
-                results.append(result)
-                changes.extend(result.changes)
+        due = [
+            spec
+            for spec in selected
+            if store.source_due(
+                spec,
+                force=force,
+                partial_retry_minutes=config.runtime.partial_retry_minutes,
+            )
+        ]
+
+    result_by_source: dict[str, SourceRunResult] = {}
+    with BoundedHttpClient(config.runtime) as client:
+        adapters = {adapter.spec.source_id: adapter for adapter in build_adapters(client)}
+
+        def execute(spec: SourceSpec) -> SourceRunResult:
+            with StateStore(config.runtime.state_path) as source_store:
+                return _run_source(adapters[spec.source_id], source_store, config, run_id, client)
+
+        source_workers = min(
+            len(due),
+            max(1, config.runtime.global_workers // config.runtime.per_host_workers),
+        )
+        if source_workers:
+            with ThreadPoolExecutor(
+                max_workers=source_workers,
+                thread_name_prefix="housing-source",
+            ) as executor:
+                futures = {executor.submit(execute, spec): spec for spec in due}
+                for future, spec in ((future, futures[future]) for future in futures):
+                    result_by_source[spec.source_id] = future.result()
+
+    results = [result_by_source[spec.source_id] for spec in due]
+    changes = [change for result in results for change in result.changes]
+    with StateStore(config.runtime.state_path) as store:
         if (
             results
             and not store.active_records()
@@ -338,6 +456,13 @@ def run_refresh(
             "retries": sum(result.metrics.retries for result in results),
             "detail_cache_hits": sum(result.metrics.detail_cache_hits for result in results),
             "detail_network": sum(result.metrics.detail_network for result in results),
+            "http_failures": sum(result.metrics.http_failures for result in results),
+            "circuit_openings": sum(result.metrics.circuit_openings for result in results),
+            "detail_not_modified": sum(result.metrics.detail_not_modified for result in results),
+            "detail_deferred": sum(result.metrics.detail_deferred for result in results),
+            "latency_p95_ms_max": max(
+                (result.metrics.latency_p95_ms for result in results), default=0.0
+            ),
         }
         payload = build_report_payload(store, run_id, results, performance, config)
         report = publish_report(config.runtime.artifacts_path, payload)
@@ -351,10 +476,22 @@ def run_refresh(
             )
             if not bootstrap:
                 notification = notify_changes(
-                    store, changes, webhook_url, limit=config.runtime.alert_limit
+                    store,
+                    changes,
+                    webhook_url,
+                    limit=config.runtime.alert_limit,
+                    max_attempts=config.runtime.notification_max_attempts,
                 )
-        store.prune()
-    exit_code = 0 if all(result.status == "healthy" for result in results) else 2
+        store.prune(config.runtime.state_retention_days)
+    prune_reports(
+        config.runtime.artifacts_path,
+        days=config.runtime.report_retention_days,
+        keep_run_id=report.run_id,
+    )
+    delivery_ok = (report_message is None or report_message.status in {"created", "updated"}) and (
+        notification is None or (notification.failed == 0 and notification.unknown == 0)
+    )
+    exit_code = 0 if all(result.status == "healthy" for result in results) and delivery_ok else 2
     return RunOutcome(
         exit_code,
         run_id,
@@ -370,7 +507,14 @@ def publish_offline_report(config: AppConfig) -> PublishedReport:
     with StateStore(config.runtime.state_path) as store:
         store.ensure_sources(source_specs())
         payload = build_report_payload(store, run_id, [], {"offline": True}, config)
-        return publish_report(config.runtime.artifacts_path, payload)
+        report = publish_report(config.runtime.artifacts_path, payload)
+        store.prune(config.runtime.state_retention_days)
+    prune_reports(
+        config.runtime.artifacts_path,
+        days=config.runtime.report_retention_days,
+        keep_run_id=report.run_id,
+    )
+    return report
 
 
 def run_doctor(config: AppConfig) -> dict[str, dict[str, object]]:
@@ -387,20 +531,39 @@ def run_doctor(config: AppConfig) -> dict[str, dict[str, object]]:
 
 
 def benchmark_fixtures(config: AppConfig, fixture_root: Path) -> dict[str, object]:
-    started = time.perf_counter()
-    parsed = 0
+    load_started = time.perf_counter()
     bytes_read = 0
+    fixtures: list[tuple[str, str]] = []
     for source_id in ("oakhouse", "best_estate", "wagaya"):
         path = fixture_root / f"{source_id}.html"
         if not path.exists():
             continue
         document = path.read_text(encoding="utf-8")
         bytes_read += len(document.encode())
-        ref = ListingRef(source_id, "fixture", f"https://example.invalid/{source_id}", "fixture")
-        parsed += len(normalize_records(ref, source_id, document))
+        fixtures.append((source_id, document))
+    load_seconds = time.perf_counter() - load_started
+    repetitions = 100
+    replay_started = time.perf_counter()
+    replay_records = 0
+    for _ in range(repetitions):
+        for source_id, document in fixtures:
+            ref = ListingRef(
+                source_id,
+                "fixture",
+                f"https://example.invalid/{source_id}",
+                "fixture",
+            )
+            records = normalize_records(ref, source_id, document)
+            replay_records += len(records)
+            for record in records:
+                classify(record, config.profile, config.ranking)
+    replay_seconds = time.perf_counter() - replay_started
     return {
-        "elapsed_seconds": round(time.perf_counter() - started, 6),
-        "records": parsed,
+        "elapsed_seconds": round(load_seconds + replay_seconds, 6),
+        "records": replay_records // repetitions,
+        "replay_records": replay_records,
+        "repetitions": repetitions,
+        "records_per_second": round(replay_records / replay_seconds, 2),
         "bytes": bytes_read,
         "configured_workers": config.runtime.global_workers,
     }

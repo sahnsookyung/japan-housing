@@ -14,14 +14,20 @@ foreigner acceptance, or total cost stay in manual review.
 Within each eligibility, registration, and cost-evidence tier, priority is a lower-is-better score:
 
 ```text
-100 × (0.60 × recurring monthly price / ¥80,000
+100 × (0.60 × ranking monthly price / ¥80,000
      + 0.40 × straight-line distance to Shibuya Station / 20 km)
 ```
 
-This makes a ¥10,000 monthly difference equivalent to about 3.75 km. Distance is calculated from
-provider-published coordinates; it is not a train-time estimate. Missing coordinates are visibly
-flagged and conservatively scored as 30 km. The weights, references, penalty, and Shibuya anchor
-are configurable in `config/profile.toml`.
+For complete cost evidence, ranking price spreads initial and exit costs over three months for the
+landing track and twelve months for the long-term track. Incomplete totals remain in a lower
+evidence tier and use only the verified recurring amount; unknown charges are never imputed. At
+the balanced weighting, a ¥10,000 monthly difference is equivalent to about 3.75 km. The dashboard
+also offers closer (40/60), balanced (60/40), cheaper (80/20), and Pareto-frontier views.
+
+Distance is calculated from provider-published coordinates and is never a train-time estimate.
+Coordinates inconsistent with the stated prefecture are rejected. Missing coordinates are visibly
+flagged and conservatively scored as 30 km; distances above 50 km are excluded by default. The
+weights, references, bounds, penalty, and Shibuya anchor are configurable in `config/profile.toml`.
 
 This is an advisory personal search tool. Confirm the lease, residence-registration eligibility,
 full fees, vacancy, and applicant screening directly with the provider before paying.
@@ -79,8 +85,12 @@ crawl and requires two complete misses before closing a room.
   closed, response bodies are capped at 5 MiB, and request concurrency and starts are bounded.
 - Only idempotent reads are retried, with exponential backoff and jitter. Repeated host failures
   open a circuit for the rest of the run.
+- Independent source hosts run concurrently while the global and per-host request bounds remain in
+  force. Retry delays do not occupy connection slots.
 - SQLite WAL stores resumable discovery, cached detail pages, staged source snapshots, decisions,
   and notification reservations.
+- Conditional `ETag` and `Last-Modified` requests avoid downloading unchanged details. SQLite
+  stages all records from a detail page in one transaction.
 - Oakhouse detail and vacancy evidence refreshes every four hours. On the other portals, eligible
   cache entries refresh every four hours, review entries every twelve hours, and excluded entries
   every seven days. A changed list fingerprint always forces detail verification.
@@ -88,10 +98,16 @@ crawl and requires two complete misses before closing a room.
   after a complete healthy crawl. A whole property disappearing only from discovery still requires
   two complete misses, preserving protection against transient index drift.
 - Partial sources may add verified records but cannot close old ones. Failed or drifted sources keep
-  the last healthy snapshot.
+  the last healthy snapshot. Partial sources retry after one hour. Detail work prioritizes
+  never-fetched pages, then oldest successful pages, while failed pages use bounded backoff.
+- Every report checks the policy/configuration hash and transactionally reclassifies stale active
+  records before sorting. Source coverage and latency/error/cache metrics are included in JSON.
 - JSON, CSV, Markdown, and a SHA-256 manifest are staged and validated before `latest.json` changes.
+- Report artifacts are retained for 30 days; state history and unused inactive/cache data are
+  retained for 90 days. Managed crash-orphaned staging data is pruned safely.
 - Exit code `0` means every due source was healthy, `2` means a valid partial report was published,
-  and `1` means configuration or publication failed.
+  a notification/report delivery failed, or delivery is ambiguous; `1` means configuration or
+  publication failed.
 
 For a four-hour scheduler, use one locked transaction:
 
@@ -120,6 +136,8 @@ uv run japan-housing bootstrap --notify
 Pin that report message manually if desired. Later notified runs edit it and send new, reactivated,
 or materially improved non-excluded listings once. A network timeout becomes `delivery_unknown`
 and is not retried automatically because Discord webhooks provide no idempotency key.
+Known server failures and rate limits retry on later runs up to the configured attempt limit. The
+persistent report records HTTP failures in state and the run exits partial when delivery fails.
 
 Explicit delivery commands are available when needed:
 

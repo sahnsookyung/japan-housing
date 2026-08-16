@@ -48,6 +48,10 @@ class RuntimeConfig:
     circuit_failure_threshold: int = 5
     checkpoint_every: int = 25
     alert_limit: int = 20
+    partial_retry_minutes: int = 60
+    report_retention_days: int = 30
+    state_retention_days: int = 90
+    notification_max_attempts: int = 3
     user_agent: str = DEFAULT_USER_AGENT
 
 
@@ -58,8 +62,10 @@ class RankingConfig:
     anchor_longitude: float = 139.7016
     price_weight: float = 0.60
     distance_weight: float = 0.40
+    price_reference_yen: int = 80_000
     distance_reference_km: float = 20.0
     missing_distance_penalty_km: float = 30.0
+    maximum_distance_km: float = 50.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +145,10 @@ def load_config(path: Path) -> AppConfig:
         circuit_failure_threshold=int(runtime_data.get("circuit_failure_threshold", 5)),
         checkpoint_every=int(runtime_data.get("checkpoint_every", 25)),
         alert_limit=int(runtime_data.get("alert_limit", 20)),
+        partial_retry_minutes=int(runtime_data.get("partial_retry_minutes", 60)),
+        report_retention_days=int(runtime_data.get("report_retention_days", 30)),
+        state_retention_days=int(runtime_data.get("state_retention_days", 90)),
+        notification_max_attempts=int(runtime_data.get("notification_max_attempts", 3)),
         user_agent=str(runtime_data.get("user_agent", DEFAULT_USER_AGENT)),
     )
     if runtime.dashboard_host not in {"127.0.0.1", "localhost", "::1"}:
@@ -157,6 +167,10 @@ def load_config(path: Path) -> AppConfig:
         "circuit_failure_threshold",
         "checkpoint_every",
         "alert_limit",
+        "partial_retry_minutes",
+        "report_retention_days",
+        "state_retention_days",
+        "notification_max_attempts",
     ):
         _positive(name, getattr(runtime, name))
     if runtime.max_queued_tasks < runtime.global_workers:
@@ -172,8 +186,10 @@ def load_config(path: Path) -> AppConfig:
         anchor_longitude=float(ranking_data.get("anchor_longitude", 139.7016)),
         price_weight=float(ranking_data.get("price_weight", 0.60)),
         distance_weight=float(ranking_data.get("distance_weight", 0.40)),
+        price_reference_yen=int(ranking_data.get("price_reference_yen", 80_000)),
         distance_reference_km=float(ranking_data.get("distance_reference_km", 20.0)),
         missing_distance_penalty_km=float(ranking_data.get("missing_distance_penalty_km", 30.0)),
+        maximum_distance_km=float(ranking_data.get("maximum_distance_km", 50.0)),
     )
     if not ranking.anchor_label.strip():
         raise ValueError("ranking anchor_label cannot be empty")
@@ -184,12 +200,16 @@ def load_config(path: Path) -> AppConfig:
     for name in (
         "price_weight",
         "distance_weight",
+        "price_reference_yen",
         "distance_reference_km",
         "missing_distance_penalty_km",
+        "maximum_distance_km",
     ):
         _positive(name, getattr(ranking, name))
     if abs(ranking.price_weight + ranking.distance_weight - 1.0) > 1e-9:
         raise ValueError("ranking price_weight and distance_weight must sum to 1")
     if ranking.missing_distance_penalty_km < ranking.distance_reference_km:
         raise ValueError("missing_distance_penalty_km must be at least distance_reference_km")
+    if ranking.maximum_distance_km < ranking.distance_reference_km:
+        raise ValueError("maximum_distance_km must be at least distance_reference_km")
     return AppConfig(profile, runtime, ranking)

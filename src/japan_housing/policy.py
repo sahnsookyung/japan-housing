@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import asdict
 from datetime import date
 from math import asin, cos, radians, sin, sqrt
 
 from .config import RankingConfig, SearchProfile
 from .models import Classification, CostScenario, HousingRecord
+
+POLICY_VERSION = 2
 
 
 def cost_scenario(record: HousingRecord, months: int) -> CostScenario:
@@ -54,13 +59,39 @@ def straight_line_distance_km(
     return 2 * 6371.0088 * asin(sqrt(min(1.0, haversine)))
 
 
+def policy_config_hash(profile: SearchProfile, ranking: RankingConfig) -> str:
+    def canonical(value: object) -> object:
+        if isinstance(value, dict):
+            return {str(key): canonical(item) for key, item in sorted(value.items())}
+        if isinstance(value, (set, frozenset)):
+            return sorted(canonical(item) for item in value)
+        if isinstance(value, (list, tuple)):
+            return [canonical(item) for item in value]
+        if isinstance(value, date):
+            return value.isoformat()
+        return value
+
+    payload = canonical(
+        {"profile": asdict(profile), "ranking": asdict(ranking), "version": POLICY_VERSION}
+    )
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode()).hexdigest()[:16]
+
+
+def _weighted_score(
+    price_ratio: float,
+    distance_ratio: float,
+    price_weight: float,
+) -> float:
+    return round(100 * (price_weight * price_ratio + (1 - price_weight) * distance_ratio), 2)
+
+
 def _priority(
     record: HousingRecord,
-    profile: SearchProfile,
     ranking: RankingConfig,
-) -> tuple[float, float, float, float | None, int | None]:
-    ranking_price = record.recurring_total_yen
-    price_ratio = ranking_price / profile.monthly_budget_yen if ranking_price is not None else 2.0
+    ranking_price: int | None,
+) -> tuple[float, float, float, float | None, float, float]:
+    price_ratio = ranking_price / ranking.price_reference_yen if ranking_price is not None else 2.0
     distance = None
     if record.latitude is not None and record.longitude is not None:
         distance = straight_line_distance_km(
@@ -70,16 +101,16 @@ def _priority(
             ranking.anchor_longitude,
         )
     scored_distance = distance if distance is not None else ranking.missing_distance_penalty_km
+    distance_ratio = scored_distance / ranking.distance_reference_km
     price_component = 100 * ranking.price_weight * price_ratio
-    distance_component = (
-        100 * ranking.distance_weight * scored_distance / ranking.distance_reference_km
-    )
+    distance_component = 100 * ranking.distance_weight * distance_ratio
     return (
-        round(price_component + distance_component, 2),
+        _weighted_score(price_ratio, distance_ratio, ranking.price_weight),
         round(price_component, 2),
         round(distance_component, 2),
         round(distance, 2) if distance is not None else None,
-        ranking_price,
+        _weighted_score(price_ratio, distance_ratio, 0.40),
+        _weighted_score(price_ratio, distance_ratio, 0.80),
     )
 
 
@@ -178,17 +209,6 @@ def classify(
         else:
             cautions.append("address registration must be confirmed before booking")
 
-    priority_score, price_component, distance_component, distance, ranking_price = _priority(
-        record, profile, ranking
-    )
-    if distance is None:
-        cautions.append(
-            f"distance to {ranking.anchor_label} unavailable; "
-            f"ranking applies a {ranking.missing_distance_penalty_km:g} km penalty"
-        )
-    else:
-        reasons.append(f"{distance:.2f} km straight-line to {ranking.anchor_label}")
-
     landing_30 = cost_scenario(record, 1)
     landing_60 = cost_scenario(record, 2)
     landing_90 = cost_scenario(record, 3)
@@ -200,6 +220,36 @@ def classify(
         track = "long_term"
     else:
         track = "both"
+
+    scenario = landing_90 if track == "landing" else long_term
+    if scenario.complete:
+        ranking_price = scenario.effective_monthly_yen
+        ranking_price_basis = (
+            "three_month_effective" if track == "landing" else "long_term_effective"
+        )
+    else:
+        ranking_price = record.recurring_total_yen
+        ranking_price_basis = "recurring_only_incomplete_total_cost"
+    (
+        priority_score,
+        price_component,
+        distance_component,
+        distance,
+        closer_score,
+        cheaper_score,
+    ) = _priority(record, ranking, ranking_price)
+    if distance is None:
+        cautions.append(
+            f"distance to {ranking.anchor_label} unavailable; "
+            f"ranking applies a {ranking.missing_distance_penalty_km:g} km penalty"
+        )
+    else:
+        reasons.append(f"{distance:.2f} km straight-line to {ranking.anchor_label}")
+        if distance > ranking.maximum_distance_km:
+            excluded.append(
+                f"{distance:.2f} km exceeds maximum useful distance "
+                f"{ranking.maximum_distance_km:g} km"
+            )
 
     if excluded:
         name = "excluded"
@@ -213,7 +263,6 @@ def classify(
         deadline_penalty = max(0, (available - profile.move_in_earliest).days)
     elif record.availability_confidence != "available_now":
         deadline_penalty = 9999
-    scenario = landing_90 if track == "landing" else long_term
     rank_key = (
         0 if name == "eligible" else 1 if name == "review" else 2,
         0 if record.registration_confidence == "confirmed" else 1,
@@ -234,6 +283,11 @@ def classify(
         distance_component,
         distance,
         ranking_price,
+        ranking_price_basis,
+        closer_score,
+        cheaper_score,
+        POLICY_VERSION,
+        policy_config_hash(profile, ranking),
         landing_30,
         landing_60,
         landing_90,

@@ -16,7 +16,9 @@ def test_profile_matches_move_window_and_safe_runtime(project_root: Path) -> Non
     assert config.ranking.anchor_label == "Shibuya Station"
     assert config.ranking.price_weight == 0.60
     assert config.ranking.distance_weight == 0.40
+    assert config.ranking.price_reference_yen == 80_000
     assert config.ranking.distance_reference_km == 20.0
+    assert config.ranking.maximum_distance_km == 50.0
     assert config.runtime.dashboard_host == "127.0.0.1"
     assert config.runtime.user_agent == DEFAULT_USER_AGENT
 
@@ -41,6 +43,8 @@ def test_missing_runtime_values_use_real_defaults(project_root: Path, tmp_path: 
 
     assert config.runtime.user_agent == DEFAULT_USER_AGENT
     assert config.runtime.global_workers == 8
+    assert config.runtime.partial_retry_minutes == 60
+    assert config.runtime.report_retention_days == 30
 
 
 def test_ranking_weights_must_sum_to_one(project_root: Path, tmp_path: Path) -> None:

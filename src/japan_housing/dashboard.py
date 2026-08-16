@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import AppConfig
-from .report import load_latest
+from .report import build_report_payload, load_latest
 from .state import StateStore
 
 MAX_DECISION_BODY = 8 * 1024
@@ -62,16 +62,17 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/api/report":
                 try:
-                    payload, _ = load_latest(config.runtime.artifacts_path)
+                    latest, _ = load_latest(config.runtime.artifacts_path)
                     with StateStore(config.runtime.state_path) as store:
-                        records = store.active_records()
-                    records.sort(
-                        key=lambda item: tuple(
-                            item.get("rank_key") or (999, str(item.get("stable_key")))
+                        payload = build_report_payload(
+                            store,
+                            str(latest["run_id"]),
+                            [],
+                            dict(latest.get("performance") or {}),
+                            config,
                         )
-                    )
-                    payload["housing"] = records
-                    payload["housing_count"] = len(records)
+                    payload["generated_at"] = latest.get("generated_at")
+                    payload["performance"] = latest.get("performance") or {}
                     self._json(HTTPStatus.OK, payload)
                 except (OSError, ValueError, RuntimeError) as exc:
                     self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})

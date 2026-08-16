@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,36 @@ def _source_status_map(health: list[dict[str, Any]]) -> dict[str, str]:
     return {str(item["source_id"]): str(item.get("last_status") or "not_run") for item in health}
 
 
+def _mark_pareto_frontier(records: list[dict[str, Any]]) -> int:
+    candidates = [
+        item
+        for item in records
+        if item.get("classification") == "eligible"
+        and isinstance(item.get("ranking_price_yen"), int)
+        and isinstance(item.get("distance_to_anchor_km"), int | float)
+    ]
+    count = 0
+    for item in records:
+        item["pareto_frontier"] = False
+    for item in candidates:
+        price = int(item["ranking_price_yen"])
+        distance = float(item["distance_to_anchor_km"])
+        dominated = any(
+            other is not item
+            and int(other["ranking_price_yen"]) <= price
+            and float(other["distance_to_anchor_km"]) <= distance
+            and (
+                int(other["ranking_price_yen"]) < price
+                or float(other["distance_to_anchor_km"]) < distance
+            )
+            for other in candidates
+        )
+        if not dominated:
+            item["pareto_frontier"] = True
+            count += 1
+    return count
+
+
 def build_report_payload(
     store: StateStore,
     run_id: str,
@@ -39,25 +69,29 @@ def build_report_payload(
     performance: dict[str, Any],
     config: AppConfig,
 ) -> dict[str, Any]:
+    reclassified = store.reclassify_active(config.profile, config.ranking)
     health = store.source_health()
     statuses = _source_status_map(health)
     records = store.active_records()
     for item in records:
         item["source_status"] = statuses.get(str(item.get("source_id")), "unknown")
     records.sort(key=lambda item: tuple(item.get("rank_key") or (999, str(item.get("stable_key")))))
+    pareto_count = _mark_pareto_frontier(records)
     counts = {name: 0 for name in ("eligible", "review", "excluded")}
     tracks = {name: 0 for name in ("landing", "long_term", "both")}
     for item in records:
         counts[str(item.get("classification"))] = counts.get(str(item.get("classification")), 0) + 1
         tracks[str(item.get("track"))] = tracks.get(str(item.get("track")), 0) + 1
-    unhealthy = [item for item in health if item.get("last_status") not in {"healthy", "partial"}]
+    persisted_statuses = [str(item.get("last_status") or "not_run") for item in health]
     status = (
-        "partial"
-        if unhealthy or any(result.status != "healthy" for result in source_results)
-        else "healthy"
+        "healthy"
+        if persisted_statuses
+        and all(value == "healthy" for value in persisted_statuses)
+        and all(result.status == "healthy" for result in source_results)
+        else "partial"
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": run_id,
         "generated_at": iso_now(),
         "status": status,
@@ -65,6 +99,7 @@ def build_report_payload(
         "classification_counts": counts,
         "track_counts": tracks,
         "source_health": health,
+        "source_coverage": store.source_coverage(),
         "performance": performance,
         "ranking": {
             "method": "weighted_normalized_price_and_straight_line_distance",
@@ -74,10 +109,22 @@ def build_report_payload(
             "anchor_longitude": config.ranking.anchor_longitude,
             "price_weight": config.ranking.price_weight,
             "distance_weight": config.ranking.distance_weight,
-            "price_reference_yen": config.profile.monthly_budget_yen,
+            "price_reference_yen": config.ranking.price_reference_yen,
             "distance_reference_km": config.ranking.distance_reference_km,
             "missing_distance_penalty_km": config.ranking.missing_distance_penalty_km,
+            "maximum_distance_km": config.ranking.maximum_distance_km,
             "uses_train_time": False,
+            "variants": {
+                "closer": {"price_weight": 0.40, "distance_weight": 0.60},
+                "balanced": {
+                    "price_weight": config.ranking.price_weight,
+                    "distance_weight": config.ranking.distance_weight,
+                },
+                "cheaper": {"price_weight": 0.80, "distance_weight": 0.20},
+            },
+            "pareto_frontier_count": pareto_count,
+            "reclassified_records": reclassified,
+            "long_term_comparison_months": config.profile.long_term_comparison_months,
         },
         "unknown_notifications": store.unknown_notifications(),
         "manual_fallbacks": [
@@ -135,7 +182,7 @@ def _markdown(payload: dict[str, Any]) -> str:
         ),
         (
             "> Priority is lower-is-better: "
-            f"{ranking['price_weight']:.0%} verified recurring monthly price plus "
+            f"{ranking['price_weight']:.0%} ranking monthly cost plus "
             f"{ranking['distance_weight']:.0%} straight-line distance to "
             f"{ranking['anchor_label']}. It does not estimate train time."
         ),
@@ -144,6 +191,11 @@ def _markdown(payload: dict[str, Any]) -> str:
             f"{ranking['distance_reference_km']:g} km each normalize to 100% of their "
             f"component; missing distance is scored as "
             f"{ranking['missing_distance_penalty_km']:g} km."
+        ),
+        (
+            f"> Complete landing listings use three-month effective monthly cost; complete "
+            f"long-term listings use the {ranking['long_term_comparison_months']}-month "
+            "effective monthly cost. Incomplete totals remain explicitly separated."
         ),
         "",
     ]
@@ -170,9 +222,17 @@ def _markdown(payload: dict[str, Any]) -> str:
             lines.append(f"### [{title}]({item.get('url')})")
             summary = (
                 f"{cost} · {place or 'location unverified'} · {item.get('track')} · "
-                f"priority {item.get('priority_score', 'unknown')} · decision: `{decision}`"
+                f"priority {item.get('priority_score', 'unknown')} · "
+                f"{'Pareto frontier · ' if item.get('pareto_frontier') else ''}"
+                f"decision: `{decision}`"
             )
             lines.append(summary)
+            ranking_price = item.get("ranking_price_yen")
+            if isinstance(ranking_price, int):
+                lines.append(
+                    f"- Ranking price: ¥{ranking_price:,}/month "
+                    f"({item.get('ranking_price_basis', 'unknown')})"
+                )
             distance = item.get("distance_to_anchor_km")
             if isinstance(distance, int | float):
                 lines.append(
@@ -239,11 +299,16 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "priority_score",
         "priority_price_component",
         "priority_distance_component",
+        "priority_closer_score",
+        "priority_cheaper_score",
+        "pareto_frontier",
         "distance_to_anchor_km",
         "latitude",
         "longitude",
         "coordinate_basis",
         "recurring_total_yen",
+        "ranking_price_yen",
+        "ranking_price_basis",
         "advertised_monthly_from_yen",
         "price_basis",
         "price_validation",
@@ -325,6 +390,31 @@ def publish_report(root: Path, payload: dict[str, Any]) -> PublishedReport:
         final / "housing.csv",
         len(payload["housing"]),
     )
+
+
+def prune_reports(root: Path, *, days: int, keep_run_id: str) -> int:
+    runs = root / "runs"
+    if not runs.is_dir():
+        return 0
+    cutoff = datetime.now().astimezone() - timedelta(days=days)
+    removed = 0
+    for child in runs.iterdir():
+        if not child.is_dir() or child.name == keep_run_id:
+            continue
+        if child.name.startswith(".staging-"):
+            modified = datetime.fromtimestamp(child.stat().st_mtime).astimezone()
+            if modified < cutoff:
+                shutil.rmtree(child)
+                removed += 1
+            continue
+        manifest = child / "manifest.json"
+        if not manifest.is_file():
+            continue
+        modified = datetime.fromtimestamp(manifest.stat().st_mtime).astimezone()
+        if modified < cutoff:
+            shutil.rmtree(child)
+            removed += 1
+    return removed
 
 
 def load_latest(root: Path) -> tuple[dict[str, Any], Path]:

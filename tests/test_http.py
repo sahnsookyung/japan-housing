@@ -67,3 +67,21 @@ def test_robots_uncertainty_fails_closed() -> None:
 def test_unsafe_source_urls_are_rejected(url: str) -> None:
     with pytest.raises(HttpFailure):
         BoundedHttpClient._check_url(url, frozenset({"source.example"}))
+
+
+def test_conditional_request_and_304_are_supported() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["If-None-Match"] == '"fixture"'
+        return httpx.Response(304, headers={"ETag": '"fixture"'})
+
+    with _client(handler) as client:
+        response = client.get(
+            "https://source.example/detail/1",
+            allowed_hosts=frozenset({"source.example"}),
+            request_headers={"If-None-Match": '"fixture"'},
+        )
+        snapshot = client.snapshot(frozenset({"source.example"}))
+
+    assert response.status_code == 304
+    assert response.body_size == 0
+    assert snapshot["statuses"] == {"304": 1}

@@ -9,6 +9,7 @@ import re
 from datetime import date
 
 from .html import clean_text, evidence_hash, meta, money, title, visible_text
+from .geography import validate_coordinates
 from .models import HOUSING_RECORD_SCHEMA_VERSION, HousingRecord, ListingRef, iso_now
 
 PREFECTURES = (
@@ -137,7 +138,7 @@ def _coordinate(value: object, minimum: float, maximum: float) -> float | None:
     return result if minimum <= result <= maximum else None
 
 
-def _coordinates(ref: ListingRef, document: str) -> tuple[float | None, float | None, str]:
+def _raw_coordinates(ref: ListingRef, document: str) -> tuple[float | None, float | None, str]:
     """Extract provider-published coordinates without calling a geocoder."""
 
     for item in _structured_objects(document):
@@ -179,6 +180,15 @@ def _coordinates(ref: ListingRef, document: str) -> tuple[float | None, float | 
     if latitude is not None and longitude is not None:
         return latitude, longitude, "provider_list_geo"
     return None, None, "unknown"
+
+
+def _coordinates(
+    ref: ListingRef,
+    document: str,
+    prefecture: str,
+) -> tuple[float | None, float | None, str]:
+    latitude, longitude, basis = _raw_coordinates(ref, document)
+    return validate_coordinates(latitude, longitude, basis, prefecture)
 
 
 def _schema_type(item: dict[str, object], expected: str) -> bool:
@@ -342,7 +352,7 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
     if initial is None:
         unknown.append("complete initial cost")
     monthly = "Monthly Apartment" in text
-    latitude, longitude, coordinate_basis = _coordinates(ref, document)
+    latitude, longitude, coordinate_basis = _coordinates(ref, document, prefecture)
     return [
         _record(
             ref,
@@ -404,7 +414,7 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
     if initial is None:
         unknown.append("complete initial cost")
     monthly = "Monthly Rental" in text
-    latitude, longitude, coordinate_basis = _coordinates(ref, document)
+    latitude, longitude, coordinate_basis = _coordinates(ref, document, prefecture)
     return [
         _record(
             ref,
@@ -461,7 +471,7 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
     prefecture = _prefecture(full_title) or _prefecture(text[:2500])
     city = _first((rf"{prefecture}\s+([^|\n]+)",), full_title)
     stations = tuple(dict.fromkeys(re.findall(r"([^\n]{1,60}?(?:Station|Sta\.))", text, re.I)))[:3]
-    latitude, longitude, coordinate_basis = _coordinates(ref, document)
+    latitude, longitude, coordinate_basis = _coordinates(ref, document, prefecture)
     records: list[HousingRecord] = []
     row_pattern = r'<tr\s+([^>]*class="p-room__caset__row"[^>]*)>(.*?)</tr>'
     for match in re.finditer(row_pattern, document, re.I | re.S):

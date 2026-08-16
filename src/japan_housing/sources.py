@@ -19,7 +19,13 @@ from .models import ListingRef
 class SourceHttpClient(Protocol):
     def robots_allowed(self, url: str, *, allowed_hosts: frozenset[str]) -> bool: ...
 
-    def get(self, url: str, *, allowed_hosts: frozenset[str]) -> HttpResponse: ...
+    def get(
+        self,
+        url: str,
+        *,
+        allowed_hosts: frozenset[str],
+        request_headers: dict[str, str] | None = None,
+    ) -> HttpResponse: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,15 +249,28 @@ class SourceAdapter:
             return self._discover_sitemap(cursor, budget)
         return self._discover_lists(cursor, budget)
 
-    def fetch_detail(self, ref: ListingRef) -> str | None:
+    def fetch_detail(
+        self,
+        ref: ListingRef,
+        *,
+        etag: str = "",
+        last_modified: str = "",
+    ) -> HttpResponse:
         if not self.client.robots_allowed(ref.url, allowed_hosts=self.spec.allowed_hosts):
             raise HttpFailure(f"robots policy disallows {ref.url}")
-        response = self.client.get(ref.url, allowed_hosts=self.spec.allowed_hosts)
-        if response.status_code == 404:
-            return None
-        if response.status_code != 200:
+        request_headers = {}
+        if etag:
+            request_headers["If-None-Match"] = etag
+        if last_modified:
+            request_headers["If-Modified-Since"] = last_modified
+        response = self.client.get(
+            ref.url,
+            allowed_hosts=self.spec.allowed_hosts,
+            request_headers=request_headers or None,
+        )
+        if response.status_code not in {200, 304, 404}:
             raise HttpFailure(f"detail returned {response.status_code}: {ref.url}")
-        return response.text
+        return response
 
 
 def source_specs() -> tuple[SourceSpec, ...]:

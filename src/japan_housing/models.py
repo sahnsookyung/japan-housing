@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 ClassificationName = Literal["eligible", "review", "excluded"]
 SourceStatus = Literal["healthy", "partial", "failed", "drifted"]
-HOUSING_RECORD_SCHEMA_VERSION = 3
+HOUSING_RECORD_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +130,11 @@ class Classification:
     priority_distance_component: float
     distance_to_anchor_km: float | None
     ranking_price_yen: int | None
+    ranking_price_basis: str
+    priority_closer_score: float
+    priority_cheaper_score: float
+    policy_version: int
+    policy_config_hash: str
     landing_30: CostScenario
     landing_60: CostScenario
     landing_90: CostScenario
@@ -149,6 +154,16 @@ class SourceMetrics:
     requests: int = 0
     bytes_downloaded: int = 0
     retries: int = 0
+    http_failures: int = 0
+    circuit_openings: int = 0
+    detail_not_modified: int = 0
+    detail_deferred: int = 0
+    latency_p50_ms: float = 0.0
+    latency_p95_ms: float = 0.0
+    latency_max_ms: float = 0.0
+    cache_hit_ratio: float = 0.0
+    verified_coverage_ratio: float = 0.0
+    http_status_counts: dict[str, int] = field(default_factory=dict)
     elapsed_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:

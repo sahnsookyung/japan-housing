@@ -8,7 +8,7 @@ import pytest
 from japan_housing.config import AppConfig
 from japan_housing.models import HOUSING_RECORD_SCHEMA_VERSION, HousingRecord, ListingRef
 from japan_housing.parsing import normalize_records
-from japan_housing.policy import classify, cost_scenario
+from japan_housing.policy import classify, cost_scenario, policy_config_hash
 
 
 def _parse(fixture_root: Path, source_id: str):
@@ -132,6 +132,29 @@ def test_best_estate_is_kept_for_registration_review(
     assert any("registration" in caution for caution in outcome.cautions)
 
 
+def test_coordinate_inconsistent_with_prefecture_is_not_scored(
+    app_config: AppConfig, project_root: Path
+) -> None:
+    document = (project_root / "tests" / "fixtures" / "best_estate.html").read_text(
+        encoding="utf-8"
+    )
+    document = document.replace('"longitude": "139.7038"', '"longitude": "137.5549"')
+    ref = ListingRef(
+        "best_estate",
+        "1",
+        "https://www.best-estate.jp/en/property/1/",
+        "fingerprint",
+    )
+
+    record = normalize_records(ref, "Best-Estate.jp", document)[0]
+    outcome = classify(record, app_config.profile, app_config.ranking)
+
+    assert record.latitude is None
+    assert record.longitude is None
+    assert record.coordinate_basis.endswith("inconsistent_with_tokyo")
+    assert outcome.distance_to_anchor_km is None
+
+
 def test_wagaya_parser_preserves_cost_and_evidence(
     app_config: AppConfig, project_root: Path
 ) -> None:
@@ -228,6 +251,37 @@ def test_priority_combines_price_and_straight_line_distance(
     assert near_outcome.rank_key < cheap_outcome.rank_key
 
 
+def test_complete_landing_cost_drives_ranking_price(
+    app_config: AppConfig,
+    project_root: Path,
+) -> None:
+    record = _parse(project_root / "tests" / "fixtures", "oakhouse")[0]
+
+    outcome = classify(record, app_config.profile, app_config.ranking)
+
+    assert outcome.ranking_price_yen == round((77_000 * 3 + 50_000) / 3)
+    assert outcome.ranking_price_basis == "three_month_effective"
+    assert outcome.priority_closer_score != outcome.priority_cheaper_score
+
+
+def test_maximum_straight_line_distance_is_enforced(
+    app_config: AppConfig,
+    project_root: Path,
+) -> None:
+    base = _parse(project_root / "tests" / "fixtures", "best_estate")[0]
+    distant = replace(
+        base,
+        prefecture="Chiba",
+        latitude=35.73,
+        longitude=140.86,
+    )
+
+    outcome = classify(distant, app_config.profile, app_config.ranking)
+
+    assert outcome.name == "excluded"
+    assert any("exceeds maximum useful distance" in reason for reason in outcome.reasons)
+
+
 def test_missing_coordinates_receive_explicit_distance_penalty(
     app_config: AppConfig,
     project_root: Path,
@@ -240,3 +294,14 @@ def test_missing_coordinates_receive_explicit_distance_penalty(
     assert outcome.distance_to_anchor_km is None
     assert outcome.priority_distance_component == 60.0
     assert any("30 km penalty" in caution for caution in outcome.cautions)
+
+
+def test_policy_hash_is_stable_for_unordered_profile_sets(app_config: AppConfig) -> None:
+    reordered = replace(
+        app_config.profile,
+        allowed_housing_types=frozenset(["1K", "private_room", "1R"]),
+    )
+
+    assert policy_config_hash(reordered, app_config.ranking) == policy_config_hash(
+        app_config.profile, app_config.ranking
+    )

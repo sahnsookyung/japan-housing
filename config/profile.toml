@@ -20,8 +20,10 @@ anchor_latitude = 35.6580
 anchor_longitude = 139.7016
 price_weight = 0.60
 distance_weight = 0.40
+price_reference_yen = 80000
 distance_reference_km = 20.0
 missing_distance_penalty_km = 30.0
+maximum_distance_km = 50.0
 
 [runtime]
 state_path = "state/housing.sqlite3"
@@ -42,4 +44,8 @@ max_attempts = 3
 circuit_failure_threshold = 5
 checkpoint_every = 25
 alert_limit = 20
+partial_retry_minutes = 60
+report_retention_days = 30
+state_retention_days = 90
+notification_max_attempts = 3
 user_agent = "JapanHousingBot/0.1 (+local personal housing search)"
