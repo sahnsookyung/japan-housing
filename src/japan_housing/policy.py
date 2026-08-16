@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 from math import asin, cos, radians, sin, sqrt
 
-from .config import RankingConfig, SearchProfile
-from .models import Classification, CostScenario, HousingRecord
+from .config import RankingConfig, RoutingConfig, SearchProfile
+from .models import Classification, CommuteSummary, CostScenario, HousingRecord
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 
 
 def cost_scenario(record: HousingRecord, months: int) -> CostScenario:
@@ -59,7 +59,11 @@ def straight_line_distance_km(
     return 2 * 6371.0088 * asin(sqrt(min(1.0, haversine)))
 
 
-def policy_config_hash(profile: SearchProfile, ranking: RankingConfig) -> str:
+def policy_config_hash(
+    profile: SearchProfile,
+    ranking: RankingConfig,
+    routing: RoutingConfig | None = None,
+) -> str:
     def canonical(value: object) -> object:
         if isinstance(value, dict):
             return {str(key): canonical(item) for key, item in sorted(value.items())}
@@ -72,25 +76,39 @@ def policy_config_hash(profile: SearchProfile, ranking: RankingConfig) -> str:
         return value
 
     payload = canonical(
-        {"profile": asdict(profile), "ranking": asdict(ranking), "version": POLICY_VERSION}
+        {
+            "profile": asdict(profile),
+            "ranking": asdict(ranking),
+            "routing": asdict(routing) if routing else None,
+            "version": POLICY_VERSION,
+        }
     )
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode()).hexdigest()[:16]
 
 
-def _weighted_score(
-    price_ratio: float,
-    distance_ratio: float,
-    price_weight: float,
-) -> float:
-    return round(100 * (price_weight * price_ratio + (1 - price_weight) * distance_ratio), 2)
+@dataclass(frozen=True, slots=True)
+class _Priority:
+    score: float
+    price_component: float
+    distance_component: float
+    transit_component: float
+    bicycle_component: float
+    distance: float | None
+    closer_score: float
+    cheaper_score: float
+
+
+def _variant_score(price_ratio: float, location_ratio: float, price_weight: float) -> float:
+    return round(100 * (price_weight * price_ratio + (1 - price_weight) * location_ratio), 2)
 
 
 def _priority(
     record: HousingRecord,
     ranking: RankingConfig,
     ranking_price: int | None,
-) -> tuple[float, float, float, float | None, float, float]:
+    commute: CommuteSummary | None,
+) -> _Priority:
     price_ratio = ranking_price / ranking.price_reference_yen if ranking_price is not None else 2.0
     distance = None
     if record.latitude is not None and record.longitude is not None:
@@ -102,15 +120,40 @@ def _priority(
         )
     scored_distance = distance if distance is not None else ranking.missing_distance_penalty_km
     distance_ratio = scored_distance / ranking.distance_reference_km
+    transit_scored = (
+        commute.transit_minutes_scored
+        if commute is not None
+        else ranking.missing_transit_penalty_minutes
+    )
+    bicycle_scored = (
+        commute.bicycle_minutes_scored
+        if commute is not None
+        else ranking.missing_bicycle_penalty_minutes
+    )
+    transit_ratio = transit_scored / ranking.transit_reference_minutes
+    bicycle_ratio = bicycle_scored / ranking.bicycle_reference_minutes
     price_component = 100 * ranking.price_weight * price_ratio
     distance_component = 100 * ranking.distance_weight * distance_ratio
-    return (
-        _weighted_score(price_ratio, distance_ratio, ranking.price_weight),
+    transit_component = 100 * ranking.transit_weight * transit_ratio
+    bicycle_component = 100 * ranking.bicycle_weight * bicycle_ratio
+    location_weight = ranking.distance_weight + ranking.transit_weight + ranking.bicycle_weight
+    location_ratio = (
+        ranking.distance_weight * distance_ratio
+        + ranking.transit_weight * transit_ratio
+        + ranking.bicycle_weight * bicycle_ratio
+    ) / location_weight
+    return _Priority(
+        round(
+            price_component + distance_component + transit_component + bicycle_component,
+            2,
+        ),
         round(price_component, 2),
         round(distance_component, 2),
+        round(transit_component, 2),
+        round(bicycle_component, 2),
         round(distance, 2) if distance is not None else None,
-        _weighted_score(price_ratio, distance_ratio, 0.40),
-        _weighted_score(price_ratio, distance_ratio, 0.80),
+        _variant_score(price_ratio, location_ratio, 0.40),
+        _variant_score(price_ratio, location_ratio, 0.80),
     )
 
 
@@ -118,6 +161,9 @@ def classify(
     record: HousingRecord,
     profile: SearchProfile,
     ranking: RankingConfig,
+    *,
+    commute: CommuteSummary | None = None,
+    routing: RoutingConfig | None = None,
 ) -> Classification:
     reasons: list[str] = []
     cautions: list[str] = []
@@ -230,26 +276,29 @@ def classify(
     else:
         ranking_price = record.recurring_total_yen
         ranking_price_basis = "recurring_only_incomplete_total_cost"
-    (
-        priority_score,
-        price_component,
-        distance_component,
-        distance,
-        closer_score,
-        cheaper_score,
-    ) = _priority(record, ranking, ranking_price)
-    if distance is None:
+    priority = _priority(record, ranking, ranking_price, commute)
+    if priority.distance is None:
         cautions.append(
             f"distance to {ranking.anchor_label} unavailable; "
             f"ranking applies a {ranking.missing_distance_penalty_km:g} km penalty"
         )
     else:
-        reasons.append(f"{distance:.2f} km straight-line to {ranking.anchor_label}")
-        if distance > ranking.maximum_distance_km:
+        reasons.append(f"{priority.distance:.2f} km straight-line to {ranking.anchor_label}")
+        if priority.distance > ranking.maximum_distance_km:
             excluded.append(
-                f"{distance:.2f} km exceeds maximum useful distance "
+                f"{priority.distance:.2f} km exceeds maximum useful distance "
                 f"{ranking.maximum_distance_km:g} km"
             )
+    if commute and commute.transit_coverage == commute.anchor_count:
+        reasons.append(
+            f"mean public-transit commute {commute.transit_minutes_mean:g} minutes "
+            f"across {commute.anchor_count} anchors"
+        )
+    if commute and commute.bicycle_coverage == commute.anchor_count:
+        reasons.append(
+            f"mean bicycle commute {commute.bicycle_minutes_mean:g} minutes "
+            f"across {commute.anchor_count} anchors"
+        )
 
     if excluded:
         name = "excluded"
@@ -267,29 +316,48 @@ def classify(
         0 if name == "eligible" else 1 if name == "review" else 2,
         0 if record.registration_confidence == "confirmed" else 1,
         0 if scenario.complete else 1,
-        priority_score,
+        priority.score,
         deadline_penalty,
         record.walk_minutes_min or 999,
         record.stable_key,
     )
     return Classification(
-        name,
-        track,
-        tuple(reasons),
-        tuple(cautions),
-        rank_key,
-        priority_score,
-        price_component,
-        distance_component,
-        distance,
-        ranking_price,
-        ranking_price_basis,
-        closer_score,
-        cheaper_score,
-        POLICY_VERSION,
-        policy_config_hash(profile, ranking),
-        landing_30,
-        landing_60,
-        landing_90,
-        long_term,
+        name=name,
+        track=track,
+        reasons=tuple(reasons),
+        cautions=tuple(cautions),
+        rank_key=rank_key,
+        priority_score=priority.score,
+        priority_price_component=priority.price_component,
+        priority_distance_component=priority.distance_component,
+        priority_transit_component=priority.transit_component,
+        priority_bicycle_component=priority.bicycle_component,
+        distance_to_anchor_km=priority.distance,
+        transit_minutes_mean=commute.transit_minutes_mean if commute else None,
+        bicycle_minutes_mean=commute.bicycle_minutes_mean if commute else None,
+        transit_minutes_scored=(
+            commute.transit_minutes_scored if commute else ranking.missing_transit_penalty_minutes
+        ),
+        bicycle_minutes_scored=(
+            commute.bicycle_minutes_scored if commute else ranking.missing_bicycle_penalty_minutes
+        ),
+        transit_route_coverage=commute.transit_coverage if commute else 0,
+        bicycle_route_coverage=commute.bicycle_coverage if commute else 0,
+        commute_anchor_count=commute.anchor_count
+        if commute
+        else len(routing.anchors)
+        if routing
+        else 0,
+        commute_routes=commute.anchors if commute else (),
+        commute_data_hash=commute.data_hash if commute else "not_fetched",
+        ranking_price_yen=ranking_price,
+        ranking_price_basis=ranking_price_basis,
+        priority_closer_score=priority.closer_score,
+        priority_cheaper_score=priority.cheaper_score,
+        policy_version=POLICY_VERSION,
+        policy_config_hash=policy_config_hash(profile, ranking, routing),
+        landing_30=landing_30,
+        landing_60=landing_60,
+        landing_90=landing_90,
+        long_term=long_term,
     )

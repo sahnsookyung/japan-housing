@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
+from .envfile import env_value
 from .state import StateStore
 
 DISCORD_HOSTS = frozenset(
@@ -47,24 +47,7 @@ def validate_webhook_url(value: str) -> str:
 def resolve_webhook_url(env_file: Path | None = Path(".env")) -> str:
     """Read the secret from environment or a non-executed dotenv file."""
 
-    value = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-    if not value and env_file is not None:
-        try:
-            lines = env_file.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
-            raise ValueError("could not read the selected webhook env file") from exc
-        for raw_line in lines:
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[7:].lstrip()
-            key, separator, candidate = line.partition("=")
-            if separator and key.strip() == "DISCORD_WEBHOOK_URL":
-                value = candidate.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                    value = value[1:-1]
-                break
+    value = env_value("DISCORD_WEBHOOK_URL", env_file)
     if not value:
         raise ValueError("DISCORD_WEBHOOK_URL is not configured")
     return validate_webhook_url(value)
@@ -217,6 +200,8 @@ def _report_content(payload: dict[str, object]) -> str:
     statuses = [item.get("last_status") for item in health if isinstance(item, dict)]
     coverage = payload.get("source_coverage")
     coverage = coverage if isinstance(coverage, list) else []
+    commute_coverage = payload.get("commute_coverage")
+    commute_coverage = commute_coverage if isinstance(commute_coverage, dict) else {}
     updated = _safe(payload.get("generated_at") or "unknown")
     report_status = _safe(payload.get("status") or "unknown")
     ranking = payload.get("ranking")
@@ -245,6 +230,11 @@ def _report_content(payload: dict[str, object]) -> str:
             )
             if coverage
             else "Coverage: unavailable"
+        ),
+        (
+            f"Commute routes: {float(commute_coverage.get('coverage_ratio') or 0):.0%} fresh · "
+            f"{int(commute_coverage.get('usable_routes') or 0)}/"
+            f"{int(commute_coverage.get('required_elements') or 0)} usable"
         ),
         "",
         "**Top candidates**",
@@ -289,11 +279,25 @@ def _report_content(payload: dict[str, object]) -> str:
             if isinstance(distance, int | float)
             else "distance penalized"
         )
+        transit = item.get("transit_minutes_mean")
+        bicycle = item.get("bicycle_minutes_mean")
+        transit_text = (
+            f"{transit:.1f} min transit" if isinstance(transit, int | float) else "transit pending"
+        )
+        bicycle_text = (
+            f"{bicycle:.1f} min bike" if isinstance(bicycle, int | float) else "bike pending"
+        )
         lines.append(
             f"• [{_safe(item.get('title') or 'Untitled')[:90]}]({item.get('url')}) — "
-            f"{cost} · {distance_text} · {score_text}"
+            f"{cost} · {distance_text} · {transit_text} · {bicycle_text} · {score_text}"
         )
-    lines.extend(("", "The attached Markdown report is replaced after every promoted run."))
+    lines.extend(
+        (
+            "",
+            "Bicycle routes are beta; verify path safety. "
+            "The attached report is replaced after every run.",
+        )
+    )
     return "\n".join(lines)[:1950]
 
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_USER_AGENT = "JapanHousingBot/0.1 (+local personal housing search)"
 
@@ -61,11 +62,45 @@ class RankingConfig:
     anchor_latitude: float = 35.6840741
     anchor_longitude: float = 139.6604630
     price_weight: float = 0.60
-    distance_weight: float = 0.40
+    distance_weight: float = 0.10
+    transit_weight: float = 0.20
+    bicycle_weight: float = 0.10
     price_reference_yen: int = 80_000
     distance_reference_km: float = 20.0
+    transit_reference_minutes: float = 45.0
+    bicycle_reference_minutes: float = 45.0
     missing_distance_penalty_km: float = 30.0
+    missing_transit_penalty_minutes: float = 90.0
+    missing_bicycle_penalty_minutes: float = 90.0
     maximum_distance_km: float = 50.0
+
+
+@dataclass(frozen=True, slots=True)
+class RouteAnchor:
+    anchor_id: str
+    label: str
+    latitude: float
+    longitude: float
+
+
+DEFAULT_ROUTE_ANCHORS = (
+    RouteAnchor("kichijoji", "Kichijoji Station", 35.7027778, 139.5797222),
+    RouteAnchor("shibuya", "Shibuya Station", 35.6586111, 139.7013889),
+    RouteAnchor("shinjuku", "Shinjuku Station", 35.6908333, 139.7002778),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingConfig:
+    enabled: bool = True
+    provider: str = "google_routes"
+    anchors: tuple[RouteAnchor, ...] = DEFAULT_ROUTE_ANCHORS
+    cache_days: int = 7
+    max_elements_per_run: int = 900
+    batch_origins: int = 30
+    departure_weekday: int = 1
+    departure_time: str = "08:30"
+    timezone: str = "Asia/Tokyo"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +108,7 @@ class AppConfig:
     profile: SearchProfile
     runtime: RuntimeConfig
     ranking: RankingConfig
+    routing: RoutingConfig
 
 
 def _positive(name: str, value: int | float) -> None:
@@ -86,6 +122,7 @@ def load_config(path: Path) -> AppConfig:
     profile_data = payload.get("profile") or {}
     runtime_data = payload.get("runtime") or {}
     ranking_data = payload.get("ranking") or {}
+    routing_data = payload.get("routing") or {}
     try:
         profile = SearchProfile(
             move_in_earliest=date.fromisoformat(str(profile_data["move_in_earliest"])),
@@ -187,10 +224,20 @@ def load_config(path: Path) -> AppConfig:
         anchor_latitude=float(ranking_data.get("anchor_latitude", 35.6840741)),
         anchor_longitude=float(ranking_data.get("anchor_longitude", 139.6604630)),
         price_weight=float(ranking_data.get("price_weight", 0.60)),
-        distance_weight=float(ranking_data.get("distance_weight", 0.40)),
+        distance_weight=float(ranking_data.get("distance_weight", 0.10)),
+        transit_weight=float(ranking_data.get("transit_weight", 0.20)),
+        bicycle_weight=float(ranking_data.get("bicycle_weight", 0.10)),
         price_reference_yen=int(ranking_data.get("price_reference_yen", 80_000)),
         distance_reference_km=float(ranking_data.get("distance_reference_km", 20.0)),
+        transit_reference_minutes=float(ranking_data.get("transit_reference_minutes", 45.0)),
+        bicycle_reference_minutes=float(ranking_data.get("bicycle_reference_minutes", 45.0)),
         missing_distance_penalty_km=float(ranking_data.get("missing_distance_penalty_km", 30.0)),
+        missing_transit_penalty_minutes=float(
+            ranking_data.get("missing_transit_penalty_minutes", 90.0)
+        ),
+        missing_bicycle_penalty_minutes=float(
+            ranking_data.get("missing_bicycle_penalty_minutes", 90.0)
+        ),
         maximum_distance_km=float(ranking_data.get("maximum_distance_km", 50.0)),
     )
     if not ranking.anchor_label.strip():
@@ -202,16 +249,103 @@ def load_config(path: Path) -> AppConfig:
     for name in (
         "price_weight",
         "distance_weight",
+        "transit_weight",
+        "bicycle_weight",
         "price_reference_yen",
         "distance_reference_km",
+        "transit_reference_minutes",
+        "bicycle_reference_minutes",
         "missing_distance_penalty_km",
+        "missing_transit_penalty_minutes",
+        "missing_bicycle_penalty_minutes",
         "maximum_distance_km",
     ):
         _positive(name, getattr(ranking, name))
-    if abs(ranking.price_weight + ranking.distance_weight - 1.0) > 1e-9:
-        raise ValueError("ranking price_weight and distance_weight must sum to 1")
+    total_weight = (
+        ranking.price_weight
+        + ranking.distance_weight
+        + ranking.transit_weight
+        + ranking.bicycle_weight
+    )
+    if abs(total_weight - 1.0) > 1e-9:
+        raise ValueError("ranking price, distance, transit, and bicycle weights must sum to 1")
     if ranking.missing_distance_penalty_km < ranking.distance_reference_km:
         raise ValueError("missing_distance_penalty_km must be at least distance_reference_km")
     if ranking.maximum_distance_km < ranking.distance_reference_km:
         raise ValueError("maximum_distance_km must be at least distance_reference_km")
-    return AppConfig(profile, runtime, ranking)
+    if ranking.missing_transit_penalty_minutes < ranking.transit_reference_minutes:
+        raise ValueError("missing transit penalty must be at least the transit reference")
+    if ranking.missing_bicycle_penalty_minutes < ranking.bicycle_reference_minutes:
+        raise ValueError("missing bicycle penalty must be at least the bicycle reference")
+
+    raw_anchors = routing_data.get("anchors") or [
+        {
+            "id": anchor.anchor_id,
+            "label": anchor.label,
+            "latitude": anchor.latitude,
+            "longitude": anchor.longitude,
+        }
+        for anchor in DEFAULT_ROUTE_ANCHORS
+    ]
+    try:
+        anchors = tuple(
+            RouteAnchor(
+                anchor_id=str(item["id"]),
+                label=str(item["label"]),
+                latitude=float(item["latitude"]),
+                longitude=float(item["longitude"]),
+            )
+            for item in raw_anchors
+        )
+    except (KeyError, TypeError) as exc:
+        raise ValueError("routing anchors require id, label, latitude, and longitude") from exc
+    routing = RoutingConfig(
+        enabled=bool(routing_data.get("enabled", True)),
+        provider=str(routing_data.get("provider", "google_routes")),
+        anchors=anchors,
+        cache_days=int(routing_data.get("cache_days", 7)),
+        max_elements_per_run=int(routing_data.get("max_elements_per_run", 900)),
+        batch_origins=int(routing_data.get("batch_origins", 30)),
+        departure_weekday=int(routing_data.get("departure_weekday", 1)),
+        departure_time=str(routing_data.get("departure_time", "08:30")),
+        timezone=str(routing_data.get("timezone", "Asia/Tokyo")),
+    )
+    if routing.provider != "google_routes":
+        raise ValueError("routing provider must be google_routes")
+    if not routing.anchors or len(routing.anchors) > 3:
+        raise ValueError("routing requires between one and three anchors")
+    if len({anchor.anchor_id for anchor in routing.anchors}) != len(routing.anchors):
+        raise ValueError("routing anchor IDs must be unique")
+    if len({anchor.label for anchor in routing.anchors}) != len(routing.anchors):
+        raise ValueError("routing anchor labels must be unique")
+    for anchor in routing.anchors:
+        if not anchor.anchor_id or not anchor.label.strip():
+            raise ValueError("routing anchor ID and label cannot be empty")
+        if not -90 <= anchor.latitude <= 90 or not -180 <= anchor.longitude <= 180:
+            raise ValueError(f"routing anchor coordinates are invalid: {anchor.anchor_id}")
+    for name in ("cache_days", "max_elements_per_run", "batch_origins"):
+        _positive(name, getattr(routing, name))
+    if routing.batch_origins * len(routing.anchors) > 100:
+        raise ValueError("routing batch exceeds the 100-element transit matrix limit")
+    if not 0 <= routing.departure_weekday <= 6:
+        raise ValueError("routing departure_weekday must be 0 (Monday) through 6 (Sunday)")
+    try:
+        datetime.strptime(routing.departure_time, "%H:%M")
+    except ValueError as exc:
+        raise ValueError("routing departure_time must be an ISO local time") from exc
+    try:
+        ZoneInfo(routing.timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("routing timezone is unknown") from exc
+    if profile.commute_anchors and profile.commute_anchors != tuple(
+        anchor.label for anchor in routing.anchors
+    ):
+        raise ValueError("profile commute_anchors must match routing anchor labels")
+    centroid_latitude = sum(anchor.latitude for anchor in routing.anchors) / len(routing.anchors)
+    centroid_longitude = sum(anchor.longitude for anchor in routing.anchors) / len(routing.anchors)
+    if (
+        abs(ranking.anchor_latitude - centroid_latitude) > 0.000001
+        or abs(ranking.anchor_longitude - centroid_longitude) > 0.000001
+    ):
+        raise ValueError("ranking anchor coordinates must equal the routing-anchor centroid")
+    return AppConfig(profile, runtime, ranking, routing)

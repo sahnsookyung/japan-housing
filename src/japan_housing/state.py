@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable
@@ -10,8 +11,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .config import RankingConfig, RoutingConfig
 from .geography import validate_coordinates
-from .models import Classification, HousingRecord, ListingRef, SourceMetrics, iso_now
+from .models import (
+    AnchorCommute,
+    Classification,
+    CommuteSummary,
+    HousingRecord,
+    ListingRef,
+    SourceMetrics,
+    iso_now,
+)
+from .routing import RouteMatrixValue, RouteOrigin, anchor_key, origin_for
 from .sources import SourceSpec
 
 
@@ -50,7 +61,18 @@ def _classification_payload(value: Classification) -> dict[str, Any]:
         "priority_score": value.priority_score,
         "priority_price_component": value.priority_price_component,
         "priority_distance_component": value.priority_distance_component,
+        "priority_transit_component": value.priority_transit_component,
+        "priority_bicycle_component": value.priority_bicycle_component,
         "distance_to_anchor_km": value.distance_to_anchor_km,
+        "transit_minutes_mean": value.transit_minutes_mean,
+        "bicycle_minutes_mean": value.bicycle_minutes_mean,
+        "transit_minutes_scored": value.transit_minutes_scored,
+        "bicycle_minutes_scored": value.bicycle_minutes_scored,
+        "transit_route_coverage": value.transit_route_coverage,
+        "bicycle_route_coverage": value.bicycle_route_coverage,
+        "commute_anchor_count": value.commute_anchor_count,
+        "commute_routes": [asdict(item) for item in value.commute_routes],
+        "commute_data_hash": value.commute_data_hash,
         "ranking_price_yen": value.ranking_price_yen,
         "ranking_price_basis": value.ranking_price_basis,
         "priority_closer_score": value.priority_closer_score,
@@ -191,6 +213,24 @@ class StateStore:
                 status TEXT NOT NULL,
                 last_error TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS commute_routes (
+                origin_key TEXT NOT NULL,
+                origin_latitude REAL NOT NULL,
+                origin_longitude REAL NOT NULL,
+                anchor_key TEXT NOT NULL,
+                anchor_id TEXT NOT NULL,
+                anchor_label TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('TRANSIT', 'BICYCLE')),
+                duration_seconds INTEGER,
+                distance_meters INTEGER,
+                condition TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                departure_at TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT 'google_routes',
+                PRIMARY KEY(origin_key, anchor_key, mode)
+            );
+            CREATE INDEX IF NOT EXISTS commute_routes_fetched
+                ON commute_routes(mode, fetched_at, origin_key);
             """
         )
         self._ensure_column("detail_cache", "etag", "TEXT NOT NULL DEFAULT ''")
@@ -638,12 +678,217 @@ class StateStore:
             result.append(item)
         return result
 
-    def reclassify_active(self, profile: object, ranking: object) -> int:
+    def routing_candidates(self) -> list[HousingRecord]:
+        rows = self.connection.execute(
+            "SELECT record_json FROM records WHERE active=1 AND classification!='excluded'"
+        ).fetchall()
+        return [HousingRecord.from_dict(json.loads(row["record_json"])) for row in rows]
+
+    def commute_origins_due(
+        self,
+        origins: list[RouteOrigin],
+        routing: RoutingConfig,
+        mode: str,
+        *,
+        force: bool = False,
+    ) -> list[RouteOrigin]:
+        if force:
+            return origins
+        cutoff = (datetime.now().astimezone() - timedelta(days=routing.cache_days)).isoformat()
+        fresh = {
+            (str(row["origin_key"]), str(row["anchor_key"]))
+            for row in self.connection.execute(
+                "SELECT origin_key, anchor_key FROM commute_routes WHERE mode=? AND fetched_at>=?",
+                (mode, cutoff),
+            ).fetchall()
+        }
+        required_anchors = {anchor_key(anchor) for anchor in routing.anchors}
+        return [
+            origin
+            for origin in origins
+            if any((origin.key, key) not in fresh for key in required_anchors)
+        ]
+
+    def save_commute_routes(self, values: list[RouteMatrixValue]) -> None:
+        if not values:
+            return
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT INTO commute_routes(
+                    origin_key, origin_latitude, origin_longitude, anchor_key,
+                    anchor_id, anchor_label, mode, duration_seconds, distance_meters,
+                    condition, fetched_at, departure_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(origin_key, anchor_key, mode) DO UPDATE SET
+                    origin_latitude=excluded.origin_latitude,
+                    origin_longitude=excluded.origin_longitude,
+                    anchor_id=excluded.anchor_id,
+                    anchor_label=excluded.anchor_label,
+                    duration_seconds=excluded.duration_seconds,
+                    distance_meters=excluded.distance_meters,
+                    condition=excluded.condition,
+                    fetched_at=excluded.fetched_at,
+                    departure_at=excluded.departure_at,
+                    provider='google_routes'
+                """,
+                [
+                    (
+                        value.origin_key,
+                        value.origin_latitude,
+                        value.origin_longitude,
+                        value.anchor_key,
+                        value.anchor_id,
+                        value.anchor_label,
+                        value.mode,
+                        value.duration_seconds,
+                        value.distance_meters,
+                        value.condition,
+                        value.fetched_at,
+                        value.departure_at,
+                    )
+                    for value in values
+                ],
+            )
+
+    def commute_summary(
+        self,
+        record: HousingRecord,
+        routing: RoutingConfig,
+        ranking: RankingConfig,
+    ) -> CommuteSummary:
+        origin = origin_for(record)
+        rows: dict[tuple[str, str], sqlite3.Row] = {}
+        if origin is not None:
+            cutoff = (datetime.now().astimezone() - timedelta(days=routing.cache_days)).isoformat()
+            current_anchor_keys = tuple(anchor_key(anchor) for anchor in routing.anchors)
+            placeholders = ",".join("?" for _ in current_anchor_keys)
+            query = f"""
+                SELECT * FROM commute_routes
+                WHERE origin_key=? AND fetched_at>=? AND anchor_key IN ({placeholders})
+            """
+            for row in self.connection.execute(
+                query, (origin.key, cutoff, *current_anchor_keys)
+            ).fetchall():
+                rows[(str(row["anchor_key"]), str(row["mode"]))] = row
+
+        commutes: list[AnchorCommute] = []
+        transit_values: list[float] = []
+        bicycle_values: list[float] = []
+        transit_scored: list[float] = []
+        bicycle_scored: list[float] = []
+        for anchor in routing.anchors:
+            key = anchor_key(anchor)
+            transit = rows.get((key, "TRANSIT"))
+            bicycle = rows.get((key, "BICYCLE"))
+
+            def minutes(row: sqlite3.Row | None) -> float | None:
+                if not row or row["condition"] != "ROUTE_EXISTS":
+                    return None
+                duration = row["duration_seconds"]
+                return round(int(duration) / 60, 1) if duration is not None else None
+
+            def distance(row: sqlite3.Row | None) -> float | None:
+                if not row or row["condition"] != "ROUTE_EXISTS":
+                    return None
+                meters = row["distance_meters"]
+                return round(int(meters) / 1000, 2) if meters is not None else None
+
+            transit_minutes = minutes(transit)
+            bicycle_minutes = minutes(bicycle)
+            if transit_minutes is not None:
+                transit_values.append(transit_minutes)
+            if bicycle_minutes is not None:
+                bicycle_values.append(bicycle_minutes)
+            transit_scored.append(
+                transit_minutes
+                if transit_minutes is not None
+                else ranking.missing_transit_penalty_minutes
+            )
+            bicycle_scored.append(
+                bicycle_minutes
+                if bicycle_minutes is not None
+                else ranking.missing_bicycle_penalty_minutes
+            )
+            commutes.append(
+                AnchorCommute(
+                    anchor.anchor_id,
+                    anchor.label,
+                    transit_minutes,
+                    distance(transit),
+                    str(transit["condition"]) if transit else "NOT_FETCHED",
+                    bicycle_minutes,
+                    distance(bicycle),
+                    str(bicycle["condition"]) if bicycle else "NOT_FETCHED",
+                )
+            )
+        serialized = json.dumps(
+            [asdict(item) for item in commutes], sort_keys=True, separators=(",", ":")
+        )
+        count = len(routing.anchors)
+        return CommuteSummary(
+            tuple(commutes),
+            round(sum(transit_values) / len(transit_values), 1) if transit_values else None,
+            round(sum(bicycle_values) / len(bicycle_values), 1) if bicycle_values else None,
+            round(sum(transit_scored) / count, 1),
+            round(sum(bicycle_scored) / count, 1),
+            len(transit_values),
+            len(bicycle_values),
+            count,
+            hashlib.sha256(serialized.encode()).hexdigest()[:16],
+        )
+
+    def commute_coverage(self, routing: RoutingConfig) -> dict[str, Any]:
+        candidates = self.routing_candidates()
+        origins = {
+            origin.key for record in candidates if (origin := origin_for(record)) is not None
+        }
+        cutoff = (datetime.now().astimezone() - timedelta(days=routing.cache_days)).isoformat()
+        keys = tuple(anchor_key(anchor) for anchor in routing.anchors)
+        placeholders = ",".join("?" for _ in keys)
+        rows = self.connection.execute(
+            f"""
+            SELECT origin_key, anchor_key, mode, condition, duration_seconds FROM commute_routes
+            WHERE fetched_at>=? AND anchor_key IN ({placeholders})
+            """,
+            (cutoff, *keys),
+        ).fetchall()
+        fresh = {
+            (str(row["origin_key"]), str(row["anchor_key"]), str(row["mode"]))
+            for row in rows
+            if str(row["origin_key"]) in origins
+        }
+        usable = {
+            (str(row["origin_key"]), str(row["anchor_key"]), str(row["mode"]))
+            for row in rows
+            if str(row["origin_key"]) in origins
+            and row["condition"] == "ROUTE_EXISTS"
+            and row["duration_seconds"] is not None
+        }
+        required = len(origins) * len(keys) * 2
+        return {
+            "provider": routing.provider,
+            "enabled": routing.enabled,
+            "candidate_origins": len(origins),
+            "unroutable_listings": sum(origin_for(record) is None for record in candidates),
+            "required_elements": required,
+            "fresh_elements": len(fresh),
+            "usable_routes": len(usable),
+            "coverage_ratio": round(len(fresh) / required, 4) if required else 1.0,
+            "route_availability_ratio": round(len(usable) / required, 4) if required else 1.0,
+            "cache_days": routing.cache_days,
+            "departure_weekday": routing.departure_weekday,
+            "departure_time": routing.departure_time,
+            "timezone": routing.timezone,
+            "modes": ["TRANSIT", "BICYCLE"],
+        }
+
+    def reclassify_active(self, profile: object, ranking: object, routing: RoutingConfig) -> int:
         """Refresh derived policy data when configuration or policy code changes."""
 
         from .policy import POLICY_VERSION, classify, policy_config_hash
 
-        target_hash = policy_config_hash(profile, ranking)
+        target_hash = policy_config_hash(profile, ranking, routing)
         rows = self.connection.execute(
             """
             SELECT stable_key, record_json, classification_json
@@ -651,6 +896,7 @@ class StateStore:
             """
         ).fetchall()
         updates: list[tuple[str, str, str, str, str]] = []
+        commute_by_origin: dict[str, CommuteSummary] = {}
         for row in rows:
             record = HousingRecord.from_dict(json.loads(row["record_json"]))
             latitude, longitude, coordinate_basis = validate_coordinates(
@@ -668,6 +914,11 @@ class StateStore:
                 record.latitude = latitude
                 record.longitude = longitude
                 record.coordinate_basis = coordinate_basis
+            origin = origin_for(record)
+            commute_key = origin.key if origin else "missing-coordinates"
+            if commute_key not in commute_by_origin:
+                commute_by_origin[commute_key] = self.commute_summary(record, routing, ranking)
+            commute = commute_by_origin[commute_key]
             try:
                 current = json.loads(row["classification_json"])
             except (TypeError, json.JSONDecodeError):
@@ -676,9 +927,10 @@ class StateStore:
                 not record_changed
                 and current.get("policy_version") == POLICY_VERSION
                 and current.get("policy_config_hash") == target_hash
+                and current.get("commute_data_hash") == commute.data_hash
             ):
                 continue
-            outcome = classify(record, profile, ranking)
+            outcome = classify(record, profile, ranking, commute=commute, routing=routing)
             updates.append(
                 (
                     outcome.name,
@@ -943,6 +1195,7 @@ class StateStore:
                 """,
                 (cutoff,),
             )
+            self.connection.execute("DELETE FROM commute_routes WHERE fetched_at < ?", (cutoff,))
             old_runs = self.connection.execute(
                 """
                 SELECT run_id FROM source_runs

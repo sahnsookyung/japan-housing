@@ -17,6 +17,7 @@ from .notify import (
     sync_latest_report_message,
 )
 from .report import load_latest
+from .routing import enrich_commutes, resolve_routes_api_key
 from .runner import (
     benchmark_fixtures,
     publish_offline_report,
@@ -42,12 +43,20 @@ def _parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--source", action="append", dest="sources")
     bootstrap.add_argument("--notify", action="store_true", help="sync only the persistent report")
     bootstrap.add_argument("--webhook-env-file", type=Path, default=Path(".env"))
+    bootstrap.add_argument("--routes-env-file", type=Path, default=Path(".env"))
 
     run = subparsers.add_parser("run", help="incremental housing refresh")
     run.add_argument("--force", action="store_true")
     run.add_argument("--source", action="append", dest="sources")
     run.add_argument("--notify", action="store_true")
     run.add_argument("--webhook-env-file", type=Path, default=Path(".env"))
+    run.add_argument("--routes-env-file", type=Path, default=Path(".env"))
+
+    commutes = subparsers.add_parser(
+        "commutes", help="refresh cached transit and bicycle route matrices"
+    )
+    commutes.add_argument("--force", action="store_true")
+    commutes.add_argument("--routes-env-file", type=Path, default=Path(".env"))
 
     subparsers.add_parser("report", help="publish a report from local state without crawling")
     subparsers.add_parser("dashboard", help="serve the local decision dashboard")
@@ -170,9 +179,30 @@ def main(argv: list[str] | None = None) -> int:
                 report = publish_offline_report(config)
             print(json.dumps({"run_id": report.run_id, "path": str(report.json_path)}))
             return 0
+        if args.command == "commutes":
+            routes_api_key = resolve_routes_api_key(args.routes_env_file, required=True)
+            assert routes_api_key is not None
+            with ProcessLock(lock_path):
+                with StateStore(config.runtime.state_path) as store:
+                    result = enrich_commutes(
+                        store,
+                        config,
+                        routes_api_key,
+                        force=bool(args.force),
+                    )
+                report = publish_offline_report(config)
+            print(
+                json.dumps(
+                    {**result.to_dict(), "run_id": report.run_id, "path": str(report.json_path)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0 if result.status == "complete" else 2
 
         should_notify = bool(args.notify)
         webhook = resolve_webhook_url(args.webhook_env_file) if should_notify else None
+        routes_api_key = resolve_routes_api_key(args.routes_env_file, required=False)
         with ProcessLock(lock_path):
             outcome = run_refresh(
                 config,
@@ -181,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
                 webhook_url=webhook,
                 source_ids=frozenset(args.sources) if args.sources else None,
                 bootstrap=args.command == "bootstrap",
+                routes_api_key=routes_api_key,
             )
         print(json.dumps(_run_summary(outcome), ensure_ascii=False, indent=2))
         return outcome.exit_code

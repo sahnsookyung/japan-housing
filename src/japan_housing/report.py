@@ -33,26 +33,30 @@ def _source_status_map(health: list[dict[str, Any]]) -> dict[str, str]:
 
 
 def _mark_pareto_frontier(records: list[dict[str, Any]]) -> int:
+    dimensions = (
+        "ranking_price_yen",
+        "distance_to_anchor_km",
+        "transit_minutes_scored",
+        "bicycle_minutes_scored",
+    )
     candidates = [
         item
         for item in records
         if item.get("classification") == "eligible"
-        and isinstance(item.get("ranking_price_yen"), int)
-        and isinstance(item.get("distance_to_anchor_km"), int | float)
+        and all(isinstance(item.get(name), int | float) for name in dimensions)
     ]
     count = 0
     for item in records:
         item["pareto_frontier"] = False
     for item in candidates:
-        price = int(item["ranking_price_yen"])
-        distance = float(item["distance_to_anchor_km"])
+        values = tuple(float(item[name]) for name in dimensions)
         dominated = any(
             other is not item
-            and int(other["ranking_price_yen"]) <= price
-            and float(other["distance_to_anchor_km"]) <= distance
-            and (
-                int(other["ranking_price_yen"]) < price
-                or float(other["distance_to_anchor_km"]) < distance
+            and all(
+                float(other[name]) <= value for name, value in zip(dimensions, values, strict=True)
+            )
+            and any(
+                float(other[name]) < value for name, value in zip(dimensions, values, strict=True)
             )
             for other in candidates
         )
@@ -69,7 +73,7 @@ def build_report_payload(
     performance: dict[str, Any],
     config: AppConfig,
 ) -> dict[str, Any]:
-    reclassified = store.reclassify_active(config.profile, config.ranking)
+    reclassified = store.reclassify_active(config.profile, config.ranking, config.routing)
     health = store.source_health()
     statuses = _source_status_map(health)
     records = store.active_records()
@@ -83,15 +87,21 @@ def build_report_payload(
         counts[str(item.get("classification"))] = counts.get(str(item.get("classification")), 0) + 1
         tracks[str(item.get("track"))] = tracks.get(str(item.get("track")), 0) + 1
     persisted_statuses = [str(item.get("last_status") or "not_run") for item in health]
+    commute_coverage = store.commute_coverage(config.routing)
+    routing_complete = (
+        not config.routing.enabled
+        or commute_coverage["fresh_elements"] == commute_coverage["required_elements"]
+    )
     status = (
         "healthy"
         if persisted_statuses
         and all(value == "healthy" for value in persisted_statuses)
         and all(result.status == "healthy" for result in source_results)
+        and routing_complete
         else "partial"
     )
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_id": run_id,
         "generated_at": iso_now(),
         "status": status,
@@ -100,28 +110,40 @@ def build_report_payload(
         "track_counts": tracks,
         "source_health": health,
         "source_coverage": store.source_coverage(),
+        "commute_coverage": commute_coverage,
         "performance": performance,
         "ranking": {
-            "method": "weighted_normalized_price_and_straight_line_distance",
+            "method": "weighted_normalized_price_distance_transit_and_bicycle",
             "direction": "lower_is_better",
             "anchor_label": config.ranking.anchor_label,
             "anchor_latitude": config.ranking.anchor_latitude,
             "anchor_longitude": config.ranking.anchor_longitude,
-            "anchor_members": list(config.profile.commute_anchors),
+            "anchor_members": [anchor.label for anchor in config.routing.anchors],
             "price_weight": config.ranking.price_weight,
             "distance_weight": config.ranking.distance_weight,
+            "transit_weight": config.ranking.transit_weight,
+            "bicycle_weight": config.ranking.bicycle_weight,
             "price_reference_yen": config.ranking.price_reference_yen,
             "distance_reference_km": config.ranking.distance_reference_km,
+            "transit_reference_minutes": config.ranking.transit_reference_minutes,
+            "bicycle_reference_minutes": config.ranking.bicycle_reference_minutes,
             "missing_distance_penalty_km": config.ranking.missing_distance_penalty_km,
+            "missing_transit_penalty_minutes": config.ranking.missing_transit_penalty_minutes,
+            "missing_bicycle_penalty_minutes": config.ranking.missing_bicycle_penalty_minutes,
             "maximum_distance_km": config.ranking.maximum_distance_km,
-            "uses_train_time": False,
+            "uses_train_time": True,
+            "uses_bus_time": True,
+            "uses_bicycle_time": True,
+            "commute_aggregation": "arithmetic_mean_across_route_anchors",
             "variants": {
-                "closer": {"price_weight": 0.40, "distance_weight": 0.60},
+                "closer": {"price_weight": 0.40, "location_weight": 0.60},
                 "balanced": {
                     "price_weight": config.ranking.price_weight,
                     "distance_weight": config.ranking.distance_weight,
+                    "transit_weight": config.ranking.transit_weight,
+                    "bicycle_weight": config.ranking.bicycle_weight,
                 },
-                "cheaper": {"price_weight": 0.80, "distance_weight": 0.20},
+                "cheaper": {"price_weight": 0.80, "location_weight": 0.20},
             },
             "pareto_frontier_count": pareto_count,
             "reclassified_records": reclassified,
@@ -184,14 +206,27 @@ def _markdown(payload: dict[str, Any]) -> str:
         (
             "> Priority is lower-is-better: "
             f"{ranking['price_weight']:.0%} ranking monthly cost plus "
-            f"{ranking['distance_weight']:.0%} straight-line distance to "
-            f"{ranking['anchor_label']}. It does not estimate train time."
+            f"{ranking['distance_weight']:.0%} straight-line midpoint distance, "
+            f"{ranking['transit_weight']:.0%} mean public-transit time, and "
+            f"{ranking['bicycle_weight']:.0%} mean bicycle time across the three stations."
         ),
         (
             f"> References: ¥{ranking['price_reference_yen']:,} and "
-            f"{ranking['distance_reference_km']:g} km each normalize to 100% of their "
-            f"component; missing distance is scored as "
-            f"{ranking['missing_distance_penalty_km']:g} km."
+            f"{ranking['distance_reference_km']:g} km, "
+            f"{ranking['transit_reference_minutes']:g} transit minutes, and "
+            f"{ranking['bicycle_reference_minutes']:g} bicycle minutes normalize their "
+            "respective components to 100%."
+        ),
+        (
+            "> Missing routes are scored conservatively as "
+            f"{ranking['missing_transit_penalty_minutes']:g} transit minutes or "
+            f"{ranking['missing_bicycle_penalty_minutes']:g} bicycle minutes. "
+            "Google bicycle routes are beta and may omit or misidentify suitable cycling paths."
+        ),
+        (
+            f"> Route coverage: {payload['commute_coverage']['fresh_elements']}/"
+            f"{payload['commute_coverage']['required_elements']} fresh matrix elements "
+            f"({payload['commute_coverage']['coverage_ratio']:.0%})."
         ),
         (
             f"> Complete landing listings use three-month effective monthly cost; complete "
@@ -238,13 +273,28 @@ def _markdown(payload: dict[str, Any]) -> str:
             if isinstance(distance, int | float):
                 lines.append(
                     f"- Distance: {distance:.2f} km straight-line to {ranking['anchor_label']} "
-                    "(not train time)"
+                    "midpoint"
                 )
             else:
                 lines.append(
                     f"- Distance: unavailable; {ranking['missing_distance_penalty_km']:g} km "
                     "ranking penalty applied"
                 )
+            transit = item.get("transit_minutes_mean")
+            bicycle = item.get("bicycle_minutes_mean")
+            anchors = int(item.get("commute_anchor_count") or 0)
+            transit_coverage = int(item.get("transit_route_coverage") or 0)
+            bicycle_coverage = int(item.get("bicycle_route_coverage") or 0)
+            lines.append(
+                f"- Public transit: {transit:.1f} min mean ({transit_coverage}/{anchors} routes)"
+                if isinstance(transit, int | float)
+                else f"- Public transit: unavailable (0/{anchors} routes)"
+            )
+            lines.append(
+                f"- Bicycle: {bicycle:.1f} min mean ({bicycle_coverage}/{anchors} routes)"
+                if isinstance(bicycle, int | float)
+                else f"- Bicycle: unavailable (0/{anchors} routes)"
+            )
             if item.get("available_text"):
                 lines.append(f"- Availability: {item['available_text']}")
             if item.get("source_id") == "oakhouse":
@@ -300,10 +350,17 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "priority_score",
         "priority_price_component",
         "priority_distance_component",
+        "priority_transit_component",
+        "priority_bicycle_component",
         "priority_closer_score",
         "priority_cheaper_score",
         "pareto_frontier",
         "distance_to_anchor_km",
+        "transit_minutes_mean",
+        "bicycle_minutes_mean",
+        "transit_route_coverage",
+        "bicycle_route_coverage",
+        "commute_anchor_count",
         "latitude",
         "longitude",
         "coordinate_basis",

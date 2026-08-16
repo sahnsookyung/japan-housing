@@ -119,6 +119,31 @@ class CostScenario:
 
 
 @dataclass(frozen=True, slots=True)
+class AnchorCommute:
+    anchor_id: str
+    anchor_label: str
+    transit_minutes: float | None
+    transit_distance_km: float | None
+    transit_condition: str
+    bicycle_minutes: float | None
+    bicycle_distance_km: float | None
+    bicycle_condition: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommuteSummary:
+    anchors: tuple[AnchorCommute, ...]
+    transit_minutes_mean: float | None
+    bicycle_minutes_mean: float | None
+    transit_minutes_scored: float
+    bicycle_minutes_scored: float
+    transit_coverage: int
+    bicycle_coverage: int
+    anchor_count: int
+    data_hash: str
+
+
+@dataclass(frozen=True, slots=True)
 class Classification:
     name: ClassificationName
     track: str
@@ -128,7 +153,18 @@ class Classification:
     priority_score: float
     priority_price_component: float
     priority_distance_component: float
+    priority_transit_component: float
+    priority_bicycle_component: float
     distance_to_anchor_km: float | None
+    transit_minutes_mean: float | None
+    bicycle_minutes_mean: float | None
+    transit_minutes_scored: float
+    bicycle_minutes_scored: float
+    transit_route_coverage: int
+    bicycle_route_coverage: int
+    commute_anchor_count: int
+    commute_routes: tuple[AnchorCommute, ...]
+    commute_data_hash: str
     ranking_price_yen: int | None
     ranking_price_basis: str
     priority_closer_score: float

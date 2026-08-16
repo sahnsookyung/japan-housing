@@ -32,6 +32,7 @@ from .notify import (
 from .parsing import normalize_records
 from .policy import classify
 from .report import PublishedReport, build_report_payload, prune_reports, publish_report
+from .routing import CommuteEnrichmentResult, enrich_commutes
 from .sources import SourceAdapter, SourceSpec, build_adapters, source_specs
 from .state import CachedPage, StateStore
 
@@ -132,7 +133,14 @@ def _stage_records(
         ):
             record.coordinate_basis = "provider_list_geo"
         record.schema_version = HOUSING_RECORD_SCHEMA_VERSION
-        result = classify(record, config.profile, config.ranking)
+        commute = store.commute_summary(record, config.routing, config.ranking)
+        result = classify(
+            record,
+            config.profile,
+            config.ranking,
+            commute=commute,
+            routing=config.routing,
+        )
         staged.append((ref.external_id, record, result))
     store.stage_many(run_id, staged)
     return len(staged)
@@ -285,7 +293,14 @@ def _run_source(
             verified_pages.add(ref.external_id)
             staged: list[tuple[str, HousingRecord, Classification]] = []
             for record in result.records:
-                outcome = classify(record, config.profile, config.ranking)
+                commute = store.commute_summary(record, config.routing, config.ranking)
+                outcome = classify(
+                    record,
+                    config.profile,
+                    config.ranking,
+                    commute=commute,
+                    routing=config.routing,
+                )
                 classifications.append(outcome)
                 staged.append((ref.external_id, record, outcome))
                 staged_count += 1
@@ -392,6 +407,7 @@ def run_refresh(
     webhook_url: str | None = None,
     source_ids: frozenset[str] | None = None,
     bootstrap: bool = False,
+    routes_api_key: str | None = None,
 ) -> RunOutcome:
     run_id = _run_id()
     started = time.perf_counter()
@@ -443,6 +459,27 @@ def run_refresh(
             and all(result.status in {"failed", "drifted"} for result in results)
         ):
             raise RuntimeError("no valid source snapshot or last-known housing data is available")
+        if config.routing.enabled and routes_api_key:
+            commute_result = enrich_commutes(store, config, routes_api_key, force=force)
+        elif config.routing.enabled:
+            coverage = store.commute_coverage(config.routing)
+            commute_result = CommuteEnrichmentResult(
+                "cached" if coverage["coverage_ratio"] == 1.0 else "not_configured",
+                int(coverage["candidate_origins"]),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                "",
+                ""
+                if coverage["coverage_ratio"] == 1.0
+                else "GOOGLE_ROUTES_API_KEY is not configured",
+            )
+        else:
+            commute_result = CommuteEnrichmentResult("disabled", 0, 0, 0, 0, 0, 0, 0, 0, "")
         performance = {
             "elapsed_seconds_before_report": round(time.perf_counter() - started, 4),
             "due_sources": len(due),
@@ -463,6 +500,7 @@ def run_refresh(
             "latency_p95_ms_max": max(
                 (result.metrics.latency_p95_ms for result in results), default=0.0
             ),
+            "commute": commute_result.to_dict(),
         }
         payload = build_report_payload(store, run_id, results, performance, config)
         report = publish_report(config.runtime.artifacts_path, payload)
@@ -491,7 +529,13 @@ def run_refresh(
     delivery_ok = (report_message is None or report_message.status in {"created", "updated"}) and (
         notification is None or (notification.failed == 0 and notification.unknown == 0)
     )
-    exit_code = 0 if all(result.status == "healthy" for result in results) and delivery_ok else 2
+    exit_code = (
+        0
+        if all(result.status == "healthy" for result in results)
+        and delivery_ok
+        and report.status == "healthy"
+        else 2
+    )
     return RunOutcome(
         exit_code,
         run_id,
@@ -556,7 +600,7 @@ def benchmark_fixtures(config: AppConfig, fixture_root: Path) -> dict[str, objec
             records = normalize_records(ref, source_id, document)
             replay_records += len(records)
             for record in records:
-                classify(record, config.profile, config.ranking)
+                classify(record, config.profile, config.ranking, routing=config.routing)
     replay_seconds = time.perf_counter() - replay_started
     return {
         "elapsed_seconds": round(load_seconds + replay_seconds, 6),

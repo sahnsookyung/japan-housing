@@ -195,7 +195,9 @@ def test_report_reclassifies_when_ranking_config_changes(
         changed_ranking = replace(
             app_config.ranking,
             price_weight=0.40,
-            distance_weight=0.60,
+            distance_weight=0.15,
+            transit_weight=0.30,
+            bicycle_weight=0.15,
         )
         changed_config = replace(app_config, ranking=changed_ranking)
         updated = build_report_payload(store, "two", [], {"offline": True}, changed_config)

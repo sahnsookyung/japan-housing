@@ -126,7 +126,8 @@ def test_full_refresh_promotes_records_and_publishes_report(
 
     outcome = runner.run_refresh(config, force=True)
 
-    assert outcome.exit_code == 0
+    assert outcome.exit_code == 2
+    assert outcome.report.status == "partial"
     assert outcome.source_results[0].status == "healthy"
     assert outcome.report.job_count == 3
     assert outcome.report.json_path.exists()
@@ -202,7 +203,7 @@ def test_independent_sources_fetch_concurrently(
 
     outcome = runner.run_refresh(config, force=True)
 
-    assert outcome.exit_code == 0
+    assert outcome.exit_code == 2
     assert [result.status for result in outcome.source_results] == ["healthy", "healthy"]
     assert outcome.report.job_count == 4
 

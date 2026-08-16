@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from japan_housing.config import AppConfig
-from japan_housing.models import HOUSING_RECORD_SCHEMA_VERSION, HousingRecord, ListingRef
+from japan_housing.models import (
+    HOUSING_RECORD_SCHEMA_VERSION,
+    AnchorCommute,
+    CommuteSummary,
+    HousingRecord,
+    ListingRef,
+)
 from japan_housing.parsing import normalize_records
 from japan_housing.policy import classify, cost_scenario, policy_config_hash
 
@@ -20,6 +26,34 @@ def _parse(fixture_root: Path, source_id: str):
         "list-fingerprint",
     )
     return normalize_records(ref, source_id, document)
+
+
+def _commute(app_config: AppConfig, transit: float, bicycle: float) -> CommuteSummary:
+    anchors = tuple(
+        AnchorCommute(
+            anchor.anchor_id,
+            anchor.label,
+            transit,
+            10.0,
+            "ROUTE_EXISTS",
+            bicycle,
+            8.0,
+            "ROUTE_EXISTS",
+        )
+        for anchor in app_config.routing.anchors
+    )
+    count = len(anchors)
+    return CommuteSummary(
+        anchors,
+        transit,
+        bicycle,
+        transit,
+        bicycle,
+        count,
+        count,
+        count,
+        f"{transit}-{bicycle}",
+    )
 
 
 def test_oakhouse_rooms_are_independent_and_vacant_only(
@@ -242,8 +276,20 @@ def test_priority_combines_price_and_straight_line_distance(
         longitude=app_config.ranking.anchor_longitude,
     )
 
-    cheap_outcome = classify(cheaper_farther, app_config.profile, app_config.ranking)
-    near_outcome = classify(pricier_near, app_config.profile, app_config.ranking)
+    cheap_outcome = classify(
+        cheaper_farther,
+        app_config.profile,
+        app_config.ranking,
+        commute=_commute(app_config, 60, 60),
+        routing=app_config.routing,
+    )
+    near_outcome = classify(
+        pricier_near,
+        app_config.profile,
+        app_config.ranking,
+        commute=_commute(app_config, 20, 20),
+        routing=app_config.routing,
+    )
 
     assert cheap_outcome.distance_to_anchor_km == pytest.approx(11.12, abs=0.02)
     assert near_outcome.distance_to_anchor_km == 0
@@ -292,7 +338,9 @@ def test_missing_coordinates_receive_explicit_distance_penalty(
     outcome = classify(missing, app_config.profile, app_config.ranking)
 
     assert outcome.distance_to_anchor_km is None
-    assert outcome.priority_distance_component == 60.0
+    assert outcome.priority_distance_component == 15.0
+    assert outcome.priority_transit_component == 40.0
+    assert outcome.priority_bicycle_component == 20.0
     assert any("30 km penalty" in caution for caution in outcome.cautions)
 
 

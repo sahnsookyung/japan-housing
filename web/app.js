@@ -159,9 +159,18 @@ function renderRows(records) {
     const distance = Number.isFinite(item.distance_to_anchor_km)
       ? `${item.distance_to_anchor_km.toFixed(2)} km to ${anchorLabel()}`
       : "Distance penalty applied";
+    const anchorCount = Number(item.commute_anchor_count || 0);
+    const transit = Number.isFinite(item.transit_minutes_mean)
+      ? `${item.transit_minutes_mean.toFixed(1)} min transit (${item.transit_route_coverage}/${anchorCount})`
+      : `Transit pending (0/${anchorCount})`;
+    const bicycle = Number.isFinite(item.bicycle_minutes_mean)
+      ? `${item.bicycle_minutes_mean.toFixed(1)} min bike (${item.bicycle_route_coverage}/${anchorCount})`
+      : `Bike pending (0/${anchorCount})`;
     row.append(node("td", {}, [
       node("strong", { text: Number.isFinite(priorityFor(item)) ? priorityFor(item).toFixed(2) : "Unknown" }),
       node("small", { text: distance }),
+      node("small", { text: transit }),
+      node("small", { text: bicycle }),
       node("small", { text: item.pareto_frontier ? "Pareto frontier" : controls.rankingView.options[controls.rankingView.selectedIndex].text }),
     ]));
     const monthly = node("td");
@@ -215,6 +224,16 @@ function renderCompare(records) {
       text: `Ranking cost ${yen(item.ranking_price_yen)} · ${(item.ranking_price_basis || "unknown").replaceAll("_", " ")}`,
     }));
     card.append(node("span", {
+      text: Number.isFinite(item.transit_minutes_mean)
+        ? `Transit mean ${item.transit_minutes_mean.toFixed(1)} min (${item.transit_route_coverage}/${item.commute_anchor_count})`
+        : "Transit routes pending",
+    }));
+    card.append(node("span", {
+      text: Number.isFinite(item.bicycle_minutes_mean)
+        ? `Bicycle mean ${item.bicycle_minutes_mean.toFixed(1)} min (${item.bicycle_route_coverage}/${item.commute_anchor_count})`
+        : "Bicycle routes pending",
+    }));
+    card.append(node("span", {
       text: `Priority ${Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "unknown"} · ${
         Number.isFinite(item.distance_to_anchor_km)
           ? `${item.distance_to_anchor_km.toFixed(2)} km straight-line to ${anchorLabel()}`
@@ -260,7 +279,9 @@ function render() {
   const records = (state.report.housing || []).filter(matches).sort(compareRank);
   document.querySelector("#result-count").textContent = `${records.length} shown`;
   document.querySelector("#summary").textContent =
-    `${state.report.housing_count} listings · ${state.report.status} snapshot · updated ${state.report.generated_at}`;
+    `${state.report.housing_count} listings · ${state.report.status} snapshot · ` +
+    `${Math.round((state.report.commute_coverage?.coverage_ratio || 0) * 100)}% commute coverage · ` +
+    `updated ${state.report.generated_at}`;
   renderRows(records);
   renderCompare(state.report.housing || []);
   renderFallbacks();

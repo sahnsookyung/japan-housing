@@ -15,20 +15,30 @@ Within each eligibility, registration, and cost-evidence tier, priority is a low
 
 ```text
 100 × (0.60 × ranking monthly price / ¥80,000
-     + 0.40 × straight-line distance to the Kichijoji–Shibuya–Shinjuku midpoint / 20 km)
+     + 0.10 × straight-line distance to the Kichijoji–Shibuya–Shinjuku midpoint / 20 km
+     + 0.20 × mean public-transit time to the three stations / 45 minutes
+     + 0.10 × mean bicycle time to the three stations / 45 minutes)
 ```
 
 For complete cost evidence, ranking price spreads initial and exit costs over three months for the
 landing track and twelve months for the long-term track. Incomplete totals remain in a lower
-evidence tier and use only the verified recurring amount; unknown charges are never imputed. At
-the balanced weighting, a ¥10,000 monthly difference is equivalent to about 3.75 km. The dashboard
-also offers closer (40/60), balanced (60/40), cheaper (80/20), and Pareto-frontier views.
+evidence tier and use only the verified recurring amount; unknown charges are never imputed. The
+dashboard also offers closer (40/60 price/location), balanced (60/40), cheaper (80/20), and
+four-dimensional Pareto-frontier views.
 
 Distance is calculated from provider-published coordinates to the arithmetic geographic centroid
-of Kichijoji, Shibuya, and Shinjuku stations (`35.6840741, 139.6604630`); it is never a train-time estimate.
-Coordinates inconsistent with the stated prefecture are rejected. Missing coordinates are visibly
-flagged and conservatively scored as 30 km; distances above 50 km are excluded by default. The
-weights, references, bounds, penalty, and midpoint anchor are configurable in `config/profile.toml`.
+of Kichijoji, Shibuya, and Shinjuku stations (`35.6840741, 139.6604630`). Actual public-transit
+(train, subway, and bus) and human-powered bicycle routes are queried separately to each station
+through Google Routes, then averaged. The representative transit departure is Tuesday at 08:30
+Japan time. Coordinates inconsistent with the stated prefecture are rejected. Missing coordinates
+are scored as 30 km; missing transit or bicycle routes are scored as 90 minutes. Distances above
+50 km are excluded by default. All weights, references, route anchors, schedule, and penalties are
+configurable in `config/profile.toml`.
+
+Route values are never inferred from straight-line distance. Google documents bicycle routing as
+beta, so every UI/report includes a route-safety warning. Route results are cached for seven days;
+the matrix run is capped at 900 billable origin-destination-mode elements and batches at most 90
+transit elements per request, below Google's 100-element transit limit.
 
 This is an advisory personal search tool. Confirm the lease, residence-registration eligibility,
 full fees, vacancy, and applicant screening directly with the provider before paying.
@@ -42,6 +52,7 @@ uv sync --extra dev
 uv run japan-housing doctor
 uv run japan-housing bootstrap
 uv run japan-housing run
+uv run japan-housing commutes
 uv run japan-housing report
 uv run japan-housing dashboard
 ```
@@ -103,12 +114,15 @@ crawl and requires two complete misses before closing a room.
   never-fetched pages, then oldest successful pages, while failed pages use bounded backoff.
 - Every report checks the policy/configuration hash and transactionally reclassifies stale active
   records before sorting. Source coverage and latency/error/cache metrics are included in JSON.
+- Public-transit and bicycle matrices are deduplicated by property coordinates, bounded by an
+  element budget, cached in SQLite for seven days, and refreshed without placing the API key in a
+  URL, log, report, or state row. Partial matrix responses are rejected rather than silently used.
 - JSON, CSV, Markdown, and a SHA-256 manifest are staged and validated before `latest.json` changes.
 - Report artifacts are retained for 30 days; state history and unused inactive/cache data are
   retained for 90 days. Managed crash-orphaned staging data is pruned safely.
-- Exit code `0` means every due source was healthy, `2` means a valid partial report was published,
-  a notification/report delivery failed, or delivery is ambiguous; `1` means configuration or
-  publication failed.
+- Exit code `0` means every due source and required commute matrix was healthy, `2` means a valid
+  partial report was published, a notification/report delivery failed, or delivery is ambiguous;
+  `1` means configuration or publication failed.
 
 For a four-hour scheduler, use one locked transaction:
 
@@ -116,17 +130,26 @@ For a four-hour scheduler, use one locked transaction:
 uv run japan-housing run --notify --webhook-env-file .env
 ```
 
-## Discord
+## Secrets and integrations
 
 The repository `.env` is ignored by Git and should contain:
 
 ```dotenv
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/…/…
+GOOGLE_ROUTES_API_KEY=…
 ```
 
 Environment values override the file. Env files are parsed as data and are never executed or
-interpolated. The URL must use an official Discord HTTPS webhook path and is never printed, logged,
-or copied to state or reports.
+interpolated. The Discord URL must use an official HTTPS webhook path. Neither secret is printed,
+logged, or copied to state or reports. Google Routes requires an enabled billing account; matrix
+usage is billed per origin × destination element, so configure a daily quota in Google Cloud.
+
+Populate the route cache and publish a newly ranked report with:
+
+```bash
+uv run japan-housing commutes --routes-env-file .env
+uv run japan-housing notify-report --webhook-env-file .env
+```
 
 Bootstrap can sync one persistent latest-report message without alerting on existing listings:
 

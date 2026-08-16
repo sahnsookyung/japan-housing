@@ -31,10 +31,16 @@ def test_profile_matches_move_window_and_safe_runtime(project_root: Path) -> Non
     assert config.ranking.anchor_latitude == pytest.approx(centroid[0], abs=0.0000001)
     assert config.ranking.anchor_longitude == pytest.approx(centroid[1], abs=0.0000001)
     assert config.ranking.price_weight == 0.60
-    assert config.ranking.distance_weight == 0.40
+    assert config.ranking.distance_weight == 0.10
+    assert config.ranking.transit_weight == 0.20
+    assert config.ranking.bicycle_weight == 0.10
     assert config.ranking.price_reference_yen == 80_000
     assert config.ranking.distance_reference_km == 20.0
     assert config.ranking.maximum_distance_km == 50.0
+    assert (
+        tuple(anchor.label for anchor in config.routing.anchors) == config.profile.commute_anchors
+    )
+    assert config.routing.batch_origins * len(config.routing.anchors) <= 100
     assert config.runtime.dashboard_host == "127.0.0.1"
     assert config.runtime.user_agent == DEFAULT_USER_AGENT
 
@@ -65,7 +71,7 @@ def test_missing_runtime_values_use_real_defaults(project_root: Path, tmp_path: 
 
 def test_ranking_weights_must_sum_to_one(project_root: Path, tmp_path: Path) -> None:
     profile = (project_root / "config" / "profile.toml").read_text(encoding="utf-8")
-    invalid = profile.replace("distance_weight = 0.40", "distance_weight = 0.60")
+    invalid = profile.replace("distance_weight = 0.10", "distance_weight = 0.20")
     path = tmp_path / "invalid-ranking.toml"
     path.write_text(invalid, encoding="utf-8")
 

@@ -20,11 +20,45 @@ anchor_label = "Kichijoji / Shibuya / Shinjuku midpoint"
 anchor_latitude = 35.6840741
 anchor_longitude = 139.6604630
 price_weight = 0.60
-distance_weight = 0.40
+distance_weight = 0.10
+transit_weight = 0.20
+bicycle_weight = 0.10
 price_reference_yen = 80000
 distance_reference_km = 20.0
+transit_reference_minutes = 45.0
+bicycle_reference_minutes = 45.0
 missing_distance_penalty_km = 30.0
+missing_transit_penalty_minutes = 90.0
+missing_bicycle_penalty_minutes = 90.0
 maximum_distance_km = 50.0
+
+[routing]
+enabled = true
+provider = "google_routes"
+cache_days = 7
+max_elements_per_run = 900
+batch_origins = 30
+departure_weekday = 1 # Tuesday
+departure_time = "08:30"
+timezone = "Asia/Tokyo"
+
+[[routing.anchors]]
+id = "kichijoji"
+label = "Kichijoji Station"
+latitude = 35.7027778
+longitude = 139.5797222
+
+[[routing.anchors]]
+id = "shibuya"
+label = "Shibuya Station"
+latitude = 35.6586111
+longitude = 139.7013889
+
+[[routing.anchors]]
+id = "shinjuku"
+label = "Shinjuku Station"
+latitude = 35.6908333
+longitude = 139.7002778
 
 [runtime]
 state_path = "state/housing.sqlite3"
