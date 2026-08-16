@@ -43,7 +43,8 @@ The automated registry uses public, robots-permitted entry points only:
   response cap while retaining the complete directly managed inventory. Property-level "from"
   prices are comparison evidence only: eligibility and the ¥80,000 ceiling use the actual vacant
   room's rent plus mandatory maintenance fee. A room-price mismatch or unverified component stays
-  in manual review, and vacancy-soon rooms after 23 September are excluded.
+  in manual review. Rooms already vacant before 15 September qualify without a ranking penalty;
+  only vacancy-soon dates after 23 September are excluded.
 - **Best-Estate.jp** — foreign-resident inventory from public Greater Tokyo under-¥80k and
   share-house pages. The site's robots-disallowed `/api` routes are never used.
 - **wagaya Japan** — public Greater Tokyo standard, share-house, and monthly listing pages.

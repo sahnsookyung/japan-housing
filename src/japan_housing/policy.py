@@ -147,7 +147,7 @@ def classify(record: HousingRecord, profile: SearchProfile) -> Classification:
         name = "eligible"
     deadline_penalty = 0
     if available:
-        deadline_penalty = abs((available - profile.move_in_earliest).days)
+        deadline_penalty = max(0, (available - profile.move_in_earliest).days)
     elif record.availability_confidence != "available_now":
         deadline_penalty = 9999
     scenario = landing_90 if track == "landing" else long_term

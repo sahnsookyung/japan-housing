@@ -94,6 +94,19 @@ def test_oakhouse_vacancy_soon_must_be_inside_move_window(
     assert classify(record, app_config.profile).name == "eligible"
 
 
+def test_vacancy_available_before_move_window_is_not_penalized(
+    app_config: AppConfig, project_root: Path
+) -> None:
+    document = (project_root / "tests" / "fixtures" / "oakhouse.html").read_text(encoding="utf-8")
+    document = document.replace("2026/09/17 ~", "2026/08/20 ~", 1)
+    ref = ListingRef("oakhouse", "1", "https://www.oakhouse.jp/eng/house/1", "fingerprint")
+
+    outcome = classify(normalize_records(ref, "Oakhouse", document)[0], app_config.profile)
+
+    assert outcome.name == "eligible"
+    assert outcome.rank_key[3] == 0
+
+
 def test_best_estate_is_kept_for_registration_review(
     app_config: AppConfig, project_root: Path
 ) -> None:
