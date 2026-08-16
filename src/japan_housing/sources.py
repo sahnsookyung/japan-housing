@@ -31,6 +31,7 @@ class SourceSpec:
     discovery_mode: str = "list"
     interval_hours: int = 12
     authoritative_disappearance: bool = False
+    detail_budget_per_run: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +241,7 @@ def source_specs() -> tuple[SourceSpec, ...]:
             frozenset({"wagaya-japan.com", "www.wagaya-japan.com"}),
             (r"https://(?:www\.)?wagaya-japan\.com/en/chintai_detail\.php\?id=\d+(?:&[^#]*)?$",),
             interval_hours=12,
+            detail_budget_per_run=100,
         ),
     )
 

@@ -11,7 +11,7 @@ def test_profile_matches_move_window_and_safe_runtime(project_root: Path) -> Non
     config = load_config(project_root / "config" / "profile.toml")
 
     assert config.profile.move_in_earliest.isoformat() == "2026-09-15"
-    assert config.profile.move_in_latest.isoformat() == "2026-09-23"
+    assert config.profile.move_in_latest.isoformat() == "2026-09-28"
     assert config.profile.monthly_budget_yen == 80_000
     assert config.runtime.dashboard_host == "127.0.0.1"
     assert config.runtime.user_agent == DEFAULT_USER_AGENT
@@ -19,7 +19,7 @@ def test_profile_matches_move_window_and_safe_runtime(project_root: Path) -> Non
 
 def test_invalid_move_window_is_rejected(project_root: Path, tmp_path: Path) -> None:
     profile = (project_root / "config" / "profile.toml").read_text(encoding="utf-8")
-    invalid = profile.replace('move_in_latest = "2026-09-23"', 'move_in_latest = "2026-09-01"')
+    invalid = profile.replace('move_in_latest = "2026-09-28"', 'move_in_latest = "2026-09-01"')
     path = tmp_path / "invalid.toml"
     path.write_text(invalid, encoding="utf-8")
 

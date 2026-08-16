@@ -1,6 +1,6 @@
 [profile]
 move_in_earliest = "2026-09-15"
-move_in_latest = "2026-09-23"
+move_in_latest = "2026-09-28"
 landing_duration_months_min = 1
 landing_duration_months_max = 3
 long_term_comparison_months = 12

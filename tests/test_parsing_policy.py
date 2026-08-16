@@ -84,13 +84,13 @@ def test_oakhouse_vacancy_soon_must_be_inside_move_window(
     app_config: AppConfig, project_root: Path
 ) -> None:
     document = (project_root / "tests" / "fixtures" / "oakhouse.html").read_text(encoding="utf-8")
-    document = document.replace("2026/10/01 ~", "2026/09/21 ~")
+    document = document.replace("2026/10/01 ~", "2026/09/26 ~")
     ref = ListingRef("oakhouse", "1", "https://www.oakhouse.jp/eng/house/1", "fingerprint")
 
     record = normalize_records(ref, "Oakhouse", document)[-1]
 
     assert record.source_availability_status == "soon"
-    assert record.available_from == "2026-09-21"
+    assert record.available_from == "2026-09-26"
     assert classify(record, app_config.profile).name == "eligible"
 
 

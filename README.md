@@ -3,7 +3,7 @@
 `japan-housing` is a bounded, incremental personal monitor for foreigner-friendly Greater Tokyo
 housing. It keeps two ranked tracks for one working-holiday resident:
 
-- a furnished, address-registerable landing room for **15–23 September 2026**, normally for one to
+- a furnished, address-registerable landing room for **15–28 September 2026**, normally for one to
   three months; and
 - a lower-cost long-term private room or 1R/1K comparison.
 
@@ -44,10 +44,12 @@ The automated registry uses public, robots-permitted entry points only:
   prices are comparison evidence only: eligibility and the ¥80,000 ceiling use the actual vacant
   room's rent plus mandatory maintenance fee. A room-price mismatch or unverified component stays
   in manual review. Rooms already vacant before 15 September qualify without a ranking penalty;
-  only vacancy-soon dates after 23 September are excluded.
+  only vacancy-soon dates after 28 September are excluded.
 - **Best-Estate.jp** — foreign-resident inventory from public Greater Tokyo under-¥80k and
   share-house pages. The site's robots-disallowed `/api` routes are never used.
 - **wagaya Japan** — public Greater Tokyo standard, share-house, and monthly listing pages.
+  Detail refreshes advance in resumable batches of at most 100 to avoid triggering the portal's
+  request protection during large initial crawls.
 
 Sakura House, Leopalace monthly, Borderless House, GaijinPot Apartments, and UR appear as manual
 fallback links in every report. They are deliberately not browser-automated when access policy,

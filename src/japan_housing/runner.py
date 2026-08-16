@@ -150,7 +150,11 @@ def _run_source(
             ref for ref in refs if not _cache_reusable(ref, cache_by_id[ref.external_id])
         ]
         metrics.detail_candidates = len(network_refs)
-        capped_refs = network_refs[: config.runtime.detail_budget_per_source]
+        source_detail_budget = min(
+            config.runtime.detail_budget_per_source,
+            spec.detail_budget_per_run or config.runtime.detail_budget_per_source,
+        )
+        capped_refs = network_refs[:source_detail_budget]
         detail_budget_exhausted = len(network_refs) > len(capped_refs)
 
         for ref in refs:
