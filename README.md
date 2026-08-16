@@ -40,7 +40,10 @@ The automated registry uses public, robots-permitted entry points only:
 
 - **Oakhouse** — primary furnished/monthly landing source. Its public house index is crawled, and
   each available room is normalized independently. The index keeps discovery below the global
-  response cap while retaining the complete directly managed inventory.
+  response cap while retaining the complete directly managed inventory. Property-level "from"
+  prices are comparison evidence only: eligibility and the ¥80,000 ceiling use the actual vacant
+  room's rent plus mandatory maintenance fee. A room-price mismatch or unverified component stays
+  in manual review, and vacancy-soon rooms after 23 September are excluded.
 - **Best-Estate.jp** — foreign-resident inventory from public Greater Tokyo under-¥80k and
   share-house pages. The site's robots-disallowed `/api` routes are never used.
 - **wagaya Japan** — public Greater Tokyo standard, share-house, and monthly listing pages.
@@ -63,8 +66,12 @@ crawl and requires two complete misses before closing a room.
   open a circuit for the rest of the run.
 - SQLite WAL stores resumable discovery, cached detail pages, staged source snapshots, decisions,
   and notification reservations.
-- Eligible cache entries refresh every four hours, review entries every twelve hours, and excluded
-  entries every seven days. A changed list fingerprint always forces detail verification.
+- Oakhouse detail and vacancy evidence refreshes every four hours. On the other portals, eligible
+  cache entries refresh every four hours, review entries every twelve hours, and excluded entries
+  every seven days. A changed list fingerprint always forces detail verification.
+- An Oakhouse room explicitly absent from a freshly verified property page is retired immediately
+  after a complete healthy crawl. A whole property disappearing only from discovery still requires
+  two complete misses, preserving protection against transient index drift.
 - Partial sources may add verified records but cannot close old ones. Failed or drifted sources keep
   the last healthy snapshot.
 - JSON, CSV, Markdown, and a SHA-256 manifest are staged and validated before `latest.json` changes.

@@ -75,6 +75,25 @@ def test_partial_snapshot_cannot_close_and_two_complete_misses_can(
         assert store.active_records() == []
 
 
+def test_verified_oakhouse_page_retires_unavailable_room_immediately(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((_spec(),))
+        _promote(store, app_config, "initial")
+
+        store.begin_source_run("verified-closed", "fixture")
+        result = store.promote(
+            "verified-closed",
+            _spec(),
+            complete=True,
+            verified_page_ids={"page-1"},
+        )
+
+        assert result.closed == 1
+        assert store.active_records() == []
+
+
 def test_decisions_and_notifications_are_idempotent(app_config: AppConfig, tmp_path: Path) -> None:
     with StateStore(tmp_path / "state.sqlite3") as store:
         store.ensure_sources((_spec(),))
@@ -101,8 +120,10 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     assert latest["run_id"] == "report-1"
     assert latest_path == published.json_path
     assert published.markdown_path.exists()
-    assert published.csv_path.read_text(encoding="utf-8").splitlines()[1].startswith("eligible")
-    assert "'=formula-like title" in published.csv_path.read_text(encoding="utf-8")
+    csv_text = published.csv_path.read_text(encoding="utf-8")
+    assert "advertised_monthly_from_yen" in csv_text.splitlines()[0]
+    assert csv_text.splitlines()[1].startswith("eligible")
+    assert "'=formula-like title" in csv_text
     manifest = json.loads((published.directory / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"housing.json", "housing.md", "housing.csv"}
     with pytest.raises(RuntimeError, match="already exists"):

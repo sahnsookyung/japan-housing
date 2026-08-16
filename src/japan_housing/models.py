@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 ClassificationName = Literal["eligible", "review", "excluded"]
 SourceStatus = Literal["healthy", "partial", "failed", "drifted"]
-HOUSING_RECORD_SCHEMA_VERSION = 1
+HOUSING_RECORD_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,12 +45,16 @@ class HousingRecord:
     management_fee_yen: int | None = None
     mandatory_monthly_fees_yen: int | None = None
     recurring_total_yen: int | None = None
+    advertised_monthly_from_yen: int | None = None
+    price_basis: str = "unknown"
+    price_validation: str = "unknown"
     initial_cost_yen: int | None = None
     exit_cost_yen: int | None = None
     unknown_costs: tuple[str, ...] = ()
     available_from: str | None = None
     available_text: str = ""
     availability_confidence: str = "unknown"
+    source_availability_status: str = "unknown"
     minimum_stay_days: int | None = None
     maximum_stay_days: int | None = None
     contract_type: str = "unknown"

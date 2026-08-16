@@ -368,7 +368,14 @@ class StateStore:
             old_record.get("registration_confidence"), 0
         )
 
-    def promote(self, run_id: str, spec: SourceSpec, *, complete: bool = True) -> PromotionResult:
+    def promote(
+        self,
+        run_id: str,
+        spec: SourceSpec,
+        *,
+        complete: bool = True,
+        verified_page_ids: set[str] | None = None,
+    ) -> PromotionResult:
         staged = self.connection.execute(
             "SELECT * FROM staged_records WHERE run_id=? AND source_id=?",
             (run_id, spec.source_id),
@@ -376,6 +383,7 @@ class StateStore:
         now = iso_now()
         changes: list[dict[str, Any]] = []
         staged_keys = {row["stable_key"] for row in staged}
+        verified_pages = verified_page_ids or set()
         closed = 0
         with self.connection:
             for row in staged:
@@ -430,13 +438,17 @@ class StateStore:
                     )
             if spec.authoritative_disappearance and complete:
                 active_rows = self.connection.execute(
-                    "SELECT stable_key, miss_count FROM records WHERE source_id=? AND active=1",
+                    """
+                    SELECT stable_key, page_external_id, miss_count
+                    FROM records WHERE source_id=? AND active=1
+                    """,
                     (spec.source_id,),
                 ).fetchall()
                 for current in active_rows:
                     if current["stable_key"] in staged_keys:
                         continue
-                    misses = int(current["miss_count"]) + 1
+                    explicitly_verified_closed = current["page_external_id"] in verified_pages
+                    misses = 2 if explicitly_verified_closed else int(current["miss_count"]) + 1
                     active = 0 if misses >= 2 else 1
                     closed += int(not active)
                     self.connection.execute(

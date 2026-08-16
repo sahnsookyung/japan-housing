@@ -24,14 +24,74 @@ def test_oakhouse_rooms_are_independent_and_vacant_only(
 ) -> None:
     records = _parse(project_root / "tests" / "fixtures", "oakhouse")
 
-    assert [record.external_id for record in records] == ["page-1:101", "page-1:102"]
+    assert [record.external_id for record in records] == [
+        "page-1:101",
+        "page-1:102",
+        "page-1:104",
+    ]
     assert records[0].recurring_total_yen == 77_000
+    assert records[0].advertised_monthly_from_yen == 68_000
+    assert records[0].price_basis == "available_room"
+    assert records[0].price_validation == "matched"
+    assert records[0].source_availability_status == "vacancy"
     assert records[0].available_from == "2026-09-17"
     assert records[0].registration_confidence == "confirmed"
-    assert classify(records[0], app_config.profile).name == "eligible"
+    eligible = classify(records[0], app_config.profile)
+    assert eligible.name == "eligible"
+    assert any("+9,000 yen" in reason for reason in eligible.reasons)
     female_only = classify(records[1], app_config.profile)
     assert female_only.name == "excluded"
     assert "female-only room" in female_only.reasons
+    after_window = classify(records[2], app_config.profile)
+    assert after_window.name == "excluded"
+    assert "available after landing window: 2026-10-01" in after_window.reasons
+
+
+def test_oakhouse_uses_available_room_price_not_advertised_from_price(
+    app_config: AppConfig, project_root: Path
+) -> None:
+    document = (project_root / "tests" / "fixtures" / "oakhouse.html").read_text(encoding="utf-8")
+    document = document.replace('data-sort_price="77000"', 'data-sort_price="83000"', 1)
+    document = document.replace("Rent: ¥59,000", "Rent: ¥65,000", 1)
+    ref = ListingRef("oakhouse", "1", "https://www.oakhouse.jp/eng/house/1", "fingerprint")
+
+    record = normalize_records(ref, "Oakhouse", document)[0]
+    outcome = classify(record, app_config.profile)
+
+    assert record.advertised_monthly_from_yen == 68_000
+    assert record.recurring_total_yen == 83_000
+    assert outcome.name == "excluded"
+    assert any("exceeds ¥80,000" in reason for reason in outcome.reasons)
+
+
+def test_oakhouse_price_component_mismatch_cannot_be_eligible(
+    app_config: AppConfig, project_root: Path
+) -> None:
+    document = (project_root / "tests" / "fixtures" / "oakhouse.html").read_text(encoding="utf-8")
+    document = document.replace('data-sort_price="77000"', 'data-sort_price="76000"', 1)
+    ref = ListingRef("oakhouse", "1", "https://www.oakhouse.jp/eng/house/1", "fingerprint")
+
+    record = normalize_records(ref, "Oakhouse", document)[0]
+    outcome = classify(record, app_config.profile)
+
+    assert record.recurring_total_yen == 77_000
+    assert record.price_validation == "mismatch_conservative_max"
+    assert "available-room total mismatch" in record.unknown_costs
+    assert outcome.name == "review"
+
+
+def test_oakhouse_vacancy_soon_must_be_inside_move_window(
+    app_config: AppConfig, project_root: Path
+) -> None:
+    document = (project_root / "tests" / "fixtures" / "oakhouse.html").read_text(encoding="utf-8")
+    document = document.replace("2026/10/01 ~", "2026/09/21 ~")
+    ref = ListingRef("oakhouse", "1", "https://www.oakhouse.jp/eng/house/1", "fingerprint")
+
+    record = normalize_records(ref, "Oakhouse", document)[-1]
+
+    assert record.source_availability_status == "soon"
+    assert record.available_from == "2026-09-21"
+    assert classify(record, app_config.profile).name == "eligible"
 
 
 def test_best_estate_is_kept_for_registration_review(

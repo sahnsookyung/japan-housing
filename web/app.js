@@ -132,6 +132,20 @@ function renderRows(records) {
     row.append(node("td", {}, [detailBlock(item)]));
     const monthly = node("td");
     monthly.append(node("strong", { text: yen(item.recurring_total_yen) }));
+    if (item.source_id === "oakhouse") {
+      monthly.append(node("small", {
+        text: `Available room: rent ${yen(item.rent_yen)} + maintenance ${yen(item.management_fee_yen)}`,
+      }));
+      if (Number.isInteger(item.advertised_monthly_from_yen)) {
+        monthly.append(node("small", {
+          className: item.advertised_monthly_from_yen === item.recurring_total_yen ? "" : "caution",
+          text: `Property advertised from ${yen(item.advertised_monthly_from_yen)}`,
+        }));
+      }
+      monthly.append(node("small", {
+        text: `Validation: ${item.price_validation || "unknown"}`,
+      }));
+    }
     monthly.append(node("small", { text: `Initial: ${yen(item.initial_cost_yen)}` }));
     row.append(monthly);
     row.append(node("td", { text: item.available_text || item.available_from || "Confirm" }));
@@ -163,6 +177,14 @@ function renderCompare(records) {
     const card = node("article", { className: "compare-card" });
     card.append(safeLink(item.url, item.title));
     card.append(node("strong", { text: `${yen(item.recurring_total_yen)}/month` }));
+    if (item.source_id === "oakhouse") {
+      card.append(node("span", {
+        text: `Available room: ${yen(item.rent_yen)} rent + ${yen(item.management_fee_yen)} maintenance`,
+      }));
+      card.append(node("span", {
+        text: `Advertised from: ${yen(item.advertised_monthly_from_yen)} · validation: ${item.price_validation}`,
+      }));
+    }
     card.append(node("span", { text: scenarioText(item) }));
     card.append(node("span", { text: `Available: ${item.available_text || "confirm"}` }));
     card.append(node("span", { text: `Registration: ${item.registration_confidence}` }));
@@ -231,4 +253,3 @@ document.querySelector("#clear-compare").addEventListener("click", () => {
 });
 
 load();
-

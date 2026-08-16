@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import japan_housing.runner as runner
 from japan_housing.config import AppConfig
 from japan_housing.http import HttpMetrics
-from japan_housing.models import ListingRef
+from japan_housing.models import HOUSING_RECORD_SCHEMA_VERSION, HousingRecord, ListingRef
 from japan_housing.sources import DiscoveryBatch, SourceSpec
+from japan_housing.state import CachedPage
 
 
 class _FixtureClient:
@@ -37,6 +39,41 @@ class _FixtureAdapter:
 
     def fetch_detail(self, ref: ListingRef) -> str:
         return self.document
+
+
+def _cached_record(schema_version: int = HOUSING_RECORD_SCHEMA_VERSION) -> HousingRecord:
+    return HousingRecord(
+        schema_version=schema_version,
+        source_id="oakhouse",
+        source_label="Oakhouse",
+        external_id="1:101",
+        url="https://www.oakhouse.jp/eng/house/1",
+        title="Room 101",
+    )
+
+
+def test_oakhouse_cache_is_never_reused_past_four_hours() -> None:
+    ref = ListingRef("oakhouse", "1", "https://www.oakhouse.jp/eng/house/1", "fingerprint")
+    cache = CachedPage(
+        "fingerprint",
+        datetime.now().astimezone() - timedelta(hours=5),
+        (_cached_record(),),
+        ("excluded",),
+    )
+
+    assert not runner._cache_reusable(ref, cache)
+
+
+def test_old_record_schema_forces_detail_revalidation() -> None:
+    ref = ListingRef("oakhouse", "1", "https://www.oakhouse.jp/eng/house/1", "fingerprint")
+    cache = CachedPage(
+        "fingerprint",
+        datetime.now().astimezone(),
+        (_cached_record(schema_version=1),),
+        ("eligible",),
+    )
+
+    assert not runner._cache_reusable(ref, cache)
 
 
 def test_full_refresh_promotes_records_and_publishes_report(
@@ -72,6 +109,9 @@ def test_full_refresh_promotes_records_and_publishes_report(
 
     assert outcome.exit_code == 0
     assert outcome.source_results[0].status == "healthy"
-    assert outcome.report.job_count == 2
+    assert outcome.report.job_count == 3
     assert outcome.report.json_path.exists()
+    markdown = outcome.report.markdown_path.read_text(encoding="utf-8")
+    assert "Available-room monthly price: ¥77,000" in markdown
+    assert "Property advertised monthly from: ¥68,000" in markdown
     assert (runtime.artifacts_path / "latest.json").exists()

@@ -191,6 +191,61 @@ def _record(
     return record
 
 
+def _oakhouse_advertised_monthly_from(document: str, row_start: int) -> int | None:
+    prefix = document[:row_start]
+    descriptions = list(
+        re.finditer(
+            r'<p[^>]*class=["\'][^"\']*\bp-room__common__description\b[^"\']*["\'][^>]*>'
+            r"(.*?)</p>",
+            prefix,
+            re.I | re.S,
+        )
+    )
+    if not descriptions:
+        return None
+    description = visible_text(descriptions[-1].group(1))
+    rent_range = description.split("Contract fee", 1)[0]
+    advertised_rents = [
+        value
+        for token in re.findall(r"(?:¥|￥)\s*[\d,]+", rent_range)
+        if (value := money(token)) is not None
+    ]
+    maintenance = _amount_after("Maintenance fee(to be paid monthly)", description)
+    if not advertised_rents or maintenance is None:
+        return None
+    return min(advertised_rents) + maintenance
+
+
+def _oakhouse_room_price(
+    room_text: str, attr: dict[str, str]
+) -> tuple[int | None, int | None, int | None, str, tuple[str, ...]]:
+    rent = _amount_after("Rent", room_text)
+    management = _amount_after("Maintenance fee", room_text)
+    row_total = int(attr["data-sort_price"]) if attr.get("data-sort_price", "").isdigit() else None
+    component_total = rent + management if rent is not None and management is not None else None
+    if component_total is not None and row_total is not None:
+        if component_total == row_total:
+            return rent, management, component_total, "matched", ()
+        return (
+            rent,
+            management,
+            max(component_total, row_total),
+            "mismatch_conservative_max",
+            ("available-room total mismatch",),
+        )
+    if component_total is not None:
+        return rent, management, component_total, "components_only", ()
+    if row_total is not None:
+        return (
+            rent,
+            management,
+            row_total,
+            "row_total_only",
+            ("available-room price components",),
+        )
+    return rent, management, None, "incomplete", ("available-room recurring total",)
+
+
 def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
     text = visible_text(document)
     page_title = title(document).split(" - Best-Estate", 1)[0]
@@ -351,27 +406,40 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
     for match in re.finditer(row_pattern, document, re.I | re.S):
         attrs, body = match.groups()
         attr = {key.lower(): value for key, value in re.findall(r'([\w-]+)="([^"]*)"', attrs)}
-        if attr.get("data-status") not in {"vacancy", "soon", "available"}:
+        source_status = attr.get("data-status", "")
+        if source_status not in {"vacancy", "soon"}:
             continue
         room_id = attr.get("id") or f"room-{len(records) + 1}"
         room_text = visible_text(body)
         available_text = _first((r"(20\d{2}/\d{1,2}/\d{1,2}\s*~)", r"(Available[^\n]+)"), room_text)
-        monthly = (
-            int(attr["data-sort_price"]) if attr.get("data-sort_price", "").isdigit() else None
+        rent, management, monthly, price_validation, unknown_costs = _oakhouse_room_price(
+            room_text, attr
         )
+        advertised = _oakhouse_advertised_monthly_from(document, match.start())
         initial = (
             int(attr["data-sort_contract"])
             if attr.get("data-sort_contract", "").isdigit()
             else None
         )
-        rent = _amount_after("Rent", room_text)
-        management = _amount_after("Maintenance fee", room_text)
         restrictions = []
         if "Woman Only" in room_text:
             restrictions.append("female_only")
         if "Man Only" in room_text:
             restrictions.append("male_only")
         room_type = attr.get("data-type")
+        housing_type = _housing_type(room_text)
+        if housing_type == "unknown" and room_type == "single":
+            housing_type = "private_room"
+        availability_confidence = (
+            "explicit"
+            if available_text
+            else "available_now"
+            if source_status == "vacancy"
+            else "unknown"
+        )
+        availability_label = available_text or (
+            "Available now" if source_status == "vacancy" else "Vacancy soon; date unverified"
+        )
         records.append(
             _record(
                 ref,
@@ -389,19 +457,23 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
                     if (walk := re.search(r"(\d+)\s*(?:min|minutes?)", text, re.I))
                     else None
                 ),
-                housing_type="private_room" if room_type == "single" else "unknown",
+                housing_type=housing_type,
                 private_space=True if room_type in {"single", "apartment"} else None,
                 furnished="Furnished" in room_text or attr.get("data-furniture") == "0",
                 rent_yen=rent,
                 management_fee_yen=management,
                 mandatory_monthly_fees_yen=0,
                 recurring_total_yen=monthly,
+                advertised_monthly_from_yen=advertised,
+                price_basis="available_room",
+                price_validation=price_validation,
                 initial_cost_yen=initial,
                 exit_cost_yen=0,
-                unknown_costs=(),
+                unknown_costs=unknown_costs,
                 available_from=_date(available_text),
-                available_text=available_text or "Available now",
-                availability_confidence="explicit" if available_text else "available_now",
+                available_text=availability_label,
+                availability_confidence=availability_confidence,
+                source_availability_status=source_status,
                 minimum_stay_days=30,
                 contract_type="monthly",
                 foreigner_evidence=("Foreign Residents Allowed",),
@@ -416,8 +488,10 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
                         None,
                         (
                             room_text[:400],
-                            available_text,
-                            f"monthly total ¥{monthly:,}" if monthly else "",
+                            f"room status: {source_status}",
+                            availability_label,
+                            (f"available-room total ¥{monthly:,}" if monthly is not None else ""),
+                            (f"advertised from ¥{advertised:,}" if advertised is not None else ""),
                         ),
                     )
                 ),

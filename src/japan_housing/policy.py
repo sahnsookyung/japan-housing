@@ -39,6 +39,7 @@ def classify(record: HousingRecord, profile: SearchProfile) -> Classification:
     reasons: list[str] = []
     cautions: list[str] = []
     excluded: list[str] = []
+    is_oakhouse = record.source_id == "oakhouse"
 
     if record.prefecture and record.prefecture not in profile.target_prefectures:
         excluded.append(f"outside target prefectures: {record.prefecture}")
@@ -73,12 +74,41 @@ def classify(record: HousingRecord, profile: SearchProfile) -> Classification:
         excluded.append(f"recurring total {total} exceeds {budget}")
     else:
         reasons.append(f"recurring total ¥{record.recurring_total_yen:,} within budget")
+    if record.unknown_costs:
+        cautions.append(f"cost evidence incomplete: {', '.join(record.unknown_costs)}")
+    if is_oakhouse:
+        if record.price_basis != "available_room":
+            cautions.append("Oakhouse price is not tied to an available room")
+        elif record.price_validation in {"matched", "components_only"}:
+            reasons.append("available-room rent and mandatory monthly fee verified")
+        else:
+            cautions.append(
+                f"available-room price validation requires review: {record.price_validation}"
+            )
+        if (
+            record.advertised_monthly_from_yen is not None
+            and record.recurring_total_yen is not None
+            and record.advertised_monthly_from_yen != record.recurring_total_yen
+        ):
+            difference = record.recurring_total_yen - record.advertised_monthly_from_yen
+            reasons.append(
+                f"available room is {difference:+,} yen versus advertised monthly from price"
+            )
 
     available = _availability(record)
-    if available and available > profile.move_in_latest:
-        cautions.append(f"available after landing window: {available.isoformat()}")
+    availability_evidence = record.available_text or record.available_from
+    if is_oakhouse and record.source_availability_status not in {"vacancy", "soon"}:
+        excluded.append("Oakhouse room is not marked vacant or vacancy-soon")
+    elif available and available > profile.move_in_latest:
+        message = f"available after landing window: {available.isoformat()}"
+        if is_oakhouse:
+            excluded.append(message)
+        else:
+            cautions.append(message)
     elif record.availability_confidence in {"explicit", "available_now"}:
-        reasons.append(f"availability evidence: {record.available_text or record.available_from}")
+        reasons.append(f"availability evidence: {availability_evidence}")
+    elif is_oakhouse:
+        excluded.append("Oakhouse availability date is not verified for the landing window")
     else:
         cautions.append("move-in availability requires confirmation")
 

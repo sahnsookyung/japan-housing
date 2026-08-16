@@ -147,6 +147,27 @@ def _markdown(payload: dict[str, Any]) -> str:
             lines.append(summary)
             if item.get("available_text"):
                 lines.append(f"- Availability: {item['available_text']}")
+            if item.get("source_id") == "oakhouse":
+                price_fields = (
+                    item.get("recurring_total_yen"),
+                    item.get("rent_yen"),
+                    item.get("management_fee_yen"),
+                )
+                if all(isinstance(value, int) for value in price_fields):
+                    total, rent, management = price_fields
+                    lines.append(
+                        f"- Available-room monthly price: ¥{total:,} "
+                        f"(rent ¥{rent:,} + maintenance ¥{management:,})"
+                    )
+                else:
+                    lines.append("- Available-room monthly price: incomplete")
+                advertised = item.get("advertised_monthly_from_yen")
+                if isinstance(advertised, int):
+                    lines.append(f"- Property advertised monthly from: ¥{advertised:,}")
+                lines.append(
+                    f"- Price validation: {item.get('price_validation', 'unknown')} · "
+                    f"room status: {item.get('source_availability_status', 'unknown')}"
+                )
             lines.append(
                 f"- Address registration: {item.get('registration_confidence', 'unknown')}"
             )
@@ -177,6 +198,10 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "city",
         "housing_type",
         "recurring_total_yen",
+        "advertised_monthly_from_yen",
+        "price_basis",
+        "price_validation",
+        "source_availability_status",
         "initial_cost_yen",
         "available_from",
         "available_text",

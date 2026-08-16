@@ -16,6 +16,7 @@ from typing import TypeVar
 from .config import AppConfig
 from .http import BoundedHttpClient, BudgetExhausted, HttpFailure
 from .models import (
+    HOUSING_RECORD_SCHEMA_VERSION,
     Classification,
     HousingRecord,
     ListingRef,
@@ -85,7 +86,9 @@ def _bounded_map(
                 pending[executor.submit(function, next_value)] = next_value
 
 
-def _cache_ttl(cache: CachedPage) -> timedelta:
+def _cache_ttl(ref: ListingRef, cache: CachedPage) -> timedelta:
+    if ref.source_id == "oakhouse":
+        return timedelta(hours=4)
     if "eligible" in cache.classifications:
         return timedelta(hours=4)
     if "review" in cache.classifications:
@@ -96,7 +99,9 @@ def _cache_ttl(cache: CachedPage) -> timedelta:
 def _cache_reusable(ref: ListingRef, cache: CachedPage | None) -> bool:
     if cache is None or cache.list_fingerprint != ref.list_fingerprint:
         return False
-    return datetime.now().astimezone() - cache.fetched_at <= _cache_ttl(cache)
+    if any(record.schema_version != HOUSING_RECORD_SCHEMA_VERSION for record in cache.records):
+        return False
+    return datetime.now().astimezone() - cache.fetched_at <= _cache_ttl(ref, cache)
 
 
 def _stage_records(
@@ -164,6 +169,7 @@ def _run_source(
             return normalize_records(ref, spec.label, document)
 
         processed: set[str] = set()
+        verified_pages: set[str] = set()
         for ref, result in _bounded_map(
             fetch,
             capped_refs,
@@ -181,6 +187,7 @@ def _run_source(
                     )
                 continue
             if result is None or (not result and spec.source_id == "oakhouse"):
+                verified_pages.add(ref.external_id)
                 metrics.explicit_closed += 1
                 store.cache_page(ref, [], [])
                 continue
@@ -192,6 +199,7 @@ def _run_source(
                     )
                 continue
             classifications: list[Classification] = []
+            verified_pages.add(ref.external_id)
             for record in result:
                 outcome = classify(record, config.profile)
                 classifications.append(outcome)
@@ -237,7 +245,12 @@ def _run_source(
                 and not detail_budget_exhausted
                 and metrics.parse_failures == 0
             )
-            promotion = store.promote(run_id, spec, complete=complete_for_closure)
+            promotion = store.promote(
+                run_id,
+                spec,
+                complete=complete_for_closure,
+                verified_page_ids=verified_pages if complete_for_closure else set(),
+            )
             changes.extend(promotion.changes)
         else:
             store.discard_staged(run_id, spec.source_id)

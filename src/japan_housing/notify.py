@@ -94,9 +94,16 @@ def _housing_message(change: dict[str, object]) -> str:
     kind = _safe(str(change.get("type") or "changed").upper())
     title = _safe(record.get("title") or "Untitled housing")[:180]
     url = str(record.get("url") or "")
+    price_note = ""
+    advertised = record.get("advertised_monthly_from_yen")
+    is_oakhouse = record.get("source_id") == "oakhouse"
+    if is_oakhouse and isinstance(advertised, int):
+        price_note = f" · advertised from ¥{advertised:,}"
+    cost_label = f"available-room {cost}" if is_oakhouse else cost
     return (
         f"**{kind}: {title}**\n"
-        f"{cost} · {place or 'location unverified'} · registration {registration}\n"
+        f"{cost_label}{price_note} · {place or 'location unverified'} · "
+        f"registration {registration}\n"
         f"{url}"
     )[:1950]
 
