@@ -134,7 +134,7 @@ def build_report_payload(
             "uses_train_time": True,
             "uses_bus_time": True,
             "uses_bicycle_time": True,
-            "commute_aggregation": "arithmetic_mean_across_route_anchors",
+            "commute_aggregation": "penalized_arithmetic_mean_across_all_route_anchors",
             "variants": {
                 "closer": {"price_weight": 0.40, "location_weight": 0.60},
                 "balanced": {
@@ -282,18 +282,28 @@ def _markdown(payload: dict[str, Any]) -> str:
                 )
             transit = item.get("transit_minutes_mean")
             bicycle = item.get("bicycle_minutes_mean")
+            transit_scored = item.get("transit_minutes_scored")
+            bicycle_scored = item.get("bicycle_minutes_scored")
             anchors = int(item.get("commute_anchor_count") or 0)
             transit_coverage = int(item.get("transit_route_coverage") or 0)
             bicycle_coverage = int(item.get("bicycle_route_coverage") or 0)
-            lines.append(
-                f"- Public transit: {transit:.1f} min mean ({transit_coverage}/{anchors} routes)"
+            transit_observed = (
+                f"{transit:.1f} min observed mean"
                 if isinstance(transit, int | float)
-                else f"- Public transit: unavailable (0/{anchors} routes)"
+                else "no observed route"
+            )
+            bicycle_observed = (
+                f"{bicycle:.1f} min observed mean"
+                if isinstance(bicycle, int | float)
+                else "no observed route"
             )
             lines.append(
-                f"- Bicycle: {bicycle:.1f} min mean ({bicycle_coverage}/{anchors} routes)"
-                if isinstance(bicycle, int | float)
-                else f"- Bicycle: unavailable (0/{anchors} routes)"
+                f"- Public transit: {transit_observed} ({transit_coverage}/{anchors}); "
+                f"ranking mean {float(transit_scored):.1f} min including missing-route penalties"
+            )
+            lines.append(
+                f"- Bicycle: {bicycle_observed} ({bicycle_coverage}/{anchors}); "
+                f"ranking mean {float(bicycle_scored):.1f} min including missing-route penalties"
             )
             if item.get("available_text"):
                 lines.append(f"- Availability: {item['available_text']}")

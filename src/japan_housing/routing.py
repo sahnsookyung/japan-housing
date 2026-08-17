@@ -46,6 +46,7 @@ class RouteMatrixValue:
     condition: str
     fetched_at: str
     departure_at: str
+    schedule_key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,11 @@ def coordinate_key(latitude: float, longitude: float) -> str:
 
 def anchor_key(anchor: RouteAnchor) -> str:
     payload = f"{anchor.anchor_id}|{anchor.latitude:.7f}|{anchor.longitude:.7f}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def transit_schedule_key(routing: RoutingConfig) -> str:
+    payload = f"{routing.departure_weekday}|{routing.departure_time}|{routing.timezone}|TRANSIT"
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -171,6 +177,7 @@ class GoogleRoutesClient:
         origins: list[RouteOrigin],
         anchors: tuple[RouteAnchor, ...],
         departure: datetime,
+        schedule_key: str,
     ) -> list[RouteMatrixValue]:
         if mode not in MODES:
             raise ValueError("unsupported route mode")
@@ -231,6 +238,7 @@ class GoogleRoutesClient:
                     condition,
                     fetched_at,
                     departure_at,
+                    schedule_key if mode == "TRANSIT" else "",
                 )
             )
         if len(observed_pairs) != len(origins) * len(anchors):
@@ -279,12 +287,14 @@ def enrich_commutes(
     routing = config.routing
     if not routing.enabled:
         return CommuteEnrichmentResult("disabled", 0, 0, 0, 0, 0, 0, 0, 0, "")
+    store.reclassify_active(config.profile, config.ranking, routing)
     records = store.routing_candidates()
     origins_by_key = {
         origin.key: origin for record in records if (origin := origin_for(record)) is not None
     }
     origins = list(origins_by_key.values())
     departure = representative_departure(routing)
+    schedule_key = transit_schedule_key(routing)
     due_by_mode = {
         mode: store.commute_origins_due(origins, routing, mode, force=force) for mode in MODES
     }
@@ -311,7 +321,13 @@ def enrich_commutes(
                         continue
                     batch = pending[mode][:maximum_origins]
                     del pending[mode][:maximum_origins]
-                    values = client.compute_matrix(mode, batch, routing.anchors, departure)
+                    values = client.compute_matrix(
+                        mode,
+                        batch,
+                        routing.anchors,
+                        departure,
+                        schedule_key,
+                    )
                     store.save_commute_routes(values)
                     elements = len(batch) * len(routing.anchors)
                     remaining_elements -= elements

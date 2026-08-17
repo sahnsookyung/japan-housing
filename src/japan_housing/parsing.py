@@ -8,8 +8,8 @@ import json
 import re
 from datetime import date
 
-from .html import clean_text, evidence_hash, meta, money, title, visible_text
 from .geography import validate_coordinates
+from .html import clean_text, evidence_hash, meta, money, title, visible_text
 from .models import HOUSING_RECORD_SCHEMA_VERSION, HousingRecord, ListingRef, iso_now
 
 PREFECTURES = (
@@ -60,6 +60,11 @@ PREFECTURES = (
     "Miyazaki",
     "Kagoshima",
     "Okinawa",
+)
+
+OAKHOUSE_ROOM_ROW_PATTERN = re.compile(
+    r'<tr\s+([^>]*class=["\'][^"\']*\bp-room__caset__row\b[^"\']*["\'][^>]*)>(.*?)</tr>',
+    re.I | re.S,
 )
 
 
@@ -308,6 +313,55 @@ def _oakhouse_room_price(
     return rent, management, None, "incomplete", ("available-room recurring total",)
 
 
+def _oakhouse_room_rows(document: str) -> list[tuple[dict[str, str], str, int]]:
+    rows: list[tuple[dict[str, str], str, int]] = []
+    for match in OAKHOUSE_ROOM_ROW_PATTERN.finditer(document):
+        raw_attributes, body = match.groups()
+        attributes = {
+            key.lower(): value
+            for key, _, value in re.findall(r"([\w-]+)\s*=\s*([\"'])(.*?)\2", raw_attributes, re.S)
+        }
+        rows.append((attributes, body, match.start()))
+    return rows
+
+
+def oakhouse_snapshot_verified(document: str, parsed_rooms: int) -> bool:
+    """Confirm that every advertised available-room row was understood by the parser."""
+
+    rows = _oakhouse_room_rows(document)
+    if rows:
+        statuses = [attributes.get("data-status", "") for attributes, _, _ in rows]
+        known_statuses = {"vacancy", "soon", "novacancy"}
+        if not all(status in known_statuses for status in statuses):
+            return False
+        available_rows = sum(status in {"vacancy", "soon"} for status in statuses)
+        available_markers = len(
+            re.findall(
+                r"\bdata-status\s*=\s*([\"'])(?:vacancy|soon)\1",
+                document,
+                re.I,
+            )
+        )
+        return parsed_rooms == available_rows == available_markers
+    if parsed_rooms:
+        return False
+    text = visible_text(document)
+    return bool(
+        re.search(
+            r"\b(?:no (?:vacant|available) rooms?|no vacancies|currently fully occupied)\b"
+            r"|空室.{0,8}(?:なし|ございません)",
+            text,
+            re.I,
+        )
+    )
+
+
+def oakhouse_verified_empty(document: str) -> bool:
+    """Return true only when the page explicitly proves that no room is available."""
+
+    return oakhouse_snapshot_verified(document, 0)
+
+
 def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
     text = visible_text(document)
     page_title = title(document).split(" - Best-Estate", 1)[0]
@@ -473,10 +527,7 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
     stations = tuple(dict.fromkeys(re.findall(r"([^\n]{1,60}?(?:Station|Sta\.))", text, re.I)))[:3]
     latitude, longitude, coordinate_basis = _coordinates(ref, document, prefecture)
     records: list[HousingRecord] = []
-    row_pattern = r'<tr\s+([^>]*class="p-room__caset__row"[^>]*)>(.*?)</tr>'
-    for match in re.finditer(row_pattern, document, re.I | re.S):
-        attrs, body = match.groups()
-        attr = {key.lower(): value for key, value in re.findall(r'([\w-]+)="([^"]*)"', attrs)}
+    for attr, body, row_start in _oakhouse_room_rows(document):
         source_status = attr.get("data-status", "")
         if source_status not in {"vacancy", "soon"}:
             continue
@@ -486,7 +537,7 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
         rent, management, monthly, price_validation, unknown_costs = _oakhouse_room_price(
             room_text, attr
         )
-        advertised = _oakhouse_advertised_monthly_from(document, match.start())
+        advertised = _oakhouse_advertised_monthly_from(document, row_start)
         initial = (
             int(attr["data-sort_contract"])
             if attr.get("data-sort_contract", "").isdigit()

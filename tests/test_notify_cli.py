@@ -58,6 +58,13 @@ def test_report_message_shows_partial_sources_and_diverse_properties() -> None:
             "recurring_total_yen": 60_000 + index,
             "distance_to_anchor_km": 10.0,
             "priority_score": 70.0 + index,
+            "transit_minutes_mean": 20.0,
+            "transit_minutes_scored": 66.7,
+            "transit_route_coverage": 1,
+            "bicycle_minutes_mean": None,
+            "bicycle_minutes_scored": 90.0,
+            "bicycle_route_coverage": 0,
+            "commute_anchor_count": 3,
             "url": f"https://example.invalid/{index}",
         }
         for index in range(7)
@@ -83,6 +90,8 @@ def test_report_message_shows_partial_sources_and_diverse_properties() -> None:
     assert "Room 1" not in content
     assert "Room 3" in content
     assert "10.00 km to Three-station midpoint" in content
+    assert "20.0 min transit observed (1/3); 66.7 scored" in content
+    assert "bike pending; 90.0 scored" in content
     assert sum(line.startswith("• ") for line in content.splitlines()) == 5
 
 

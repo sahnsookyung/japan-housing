@@ -179,6 +179,8 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     assert "priority_score" in csv_text.splitlines()[0]
     assert csv_text.splitlines()[1].startswith("eligible")
     assert "'=formula-like title" in csv_text
+    markdown = published.markdown_path.read_text(encoding="utf-8")
+    assert "ranking mean 90.0 min including missing-route penalties" in markdown
     manifest = json.loads((published.directory / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"housing.json", "housing.md", "housing.csv"}
     with pytest.raises(RuntimeError, match="already exists"):

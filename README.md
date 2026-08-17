@@ -16,8 +16,8 @@ Within each eligibility, registration, and cost-evidence tier, priority is a low
 ```text
 100 × (0.60 × ranking monthly price / ¥80,000
      + 0.10 × straight-line distance to the Kichijoji–Shibuya–Shinjuku midpoint / 20 km
-     + 0.20 × mean public-transit time to the three stations / 45 minutes
-     + 0.10 × mean bicycle time to the three stations / 45 minutes)
+     + 0.20 × scored mean public-transit time to the three stations / 45 minutes
+     + 0.10 × scored mean bicycle time to the three stations / 45 minutes)
 ```
 
 For complete cost evidence, ranking price spreads initial and exit costs over three months for the
@@ -35,10 +35,13 @@ are scored as 30 km; missing transit or bicycle routes are scored as 90 minutes.
 50 km are excluded by default. All weights, references, route anchors, schedule, and penalties are
 configurable in `config/profile.toml`.
 
-Route values are never inferred from straight-line distance. Google documents bicycle routing as
-beta, so every UI/report includes a route-safety warning. Route results are cached for seven days;
-the matrix run is capped at 900 billable origin-destination-mode elements and batches at most 90
-transit elements per request, below Google's 100-element transit limit.
+Route values are never inferred from straight-line distance. When only some station routes exist,
+reports show both the observed-route mean and the all-anchor ranking mean; the latter includes the
+configured 90-minute penalty for every missing route. Google documents bicycle routing as beta, so
+every UI/report includes a route-safety warning. Route results are cached for seven days; changing
+the configured transit weekday, time, or timezone invalidates transit rows without discarding valid
+bicycle rows. The matrix run is capped at 900 billable origin-destination-mode elements and batches
+at most 90 transit elements per request, below Google's 100-element transit limit.
 
 This is an advisory personal search tool. Confirm the lease, residence-registration eligibility,
 full fees, vacancy, and applicant screening directly with the provider before paying.
@@ -105,7 +108,12 @@ crawl and requires two complete misses before closing a room.
   stages all records from a detail page in one transaction.
 - Oakhouse detail and vacancy evidence refreshes every four hours. On the other portals, eligible
   cache entries refresh every four hours, review entries every twelve hours, and excluded entries
-  every seven days. A changed list fingerprint always forces detail verification.
+  every seven days. Refresh tiers are recomputed from the current profile rather than trusting the
+  classification saved at the previous fetch. A changed list fingerprint always forces detail
+  verification.
+- An Oakhouse page is considered explicitly empty only when recognized room rows are all unavailable,
+  the page contains an explicit no-vacancy marker, or the property returns 404. Ambiguous zero-result
+  parsing retains cached rooms and records a parser failure instead of silently closing inventory.
 - An Oakhouse room explicitly absent from a freshly verified property page is retired immediately
   after a complete healthy crawl. A whole property disappearing only from discovery still requires
   two complete misses, preserving protection against transient index drift.
@@ -116,7 +124,8 @@ crawl and requires two complete misses before closing a room.
   records before sorting. Source coverage and latency/error/cache metrics are included in JSON.
 - Public-transit and bicycle matrices are deduplicated by property coordinates, bounded by an
   element budget, cached in SQLite for seven days, and refreshed without placing the API key in a
-  URL, log, report, or state row. Partial matrix responses are rejected rather than silently used.
+  URL, log, report, or state row. Active records are reclassified before route candidates are
+  selected. Partial matrix responses are rejected rather than silently used.
 - JSON, CSV, Markdown, and a SHA-256 manifest are staged and validated before `latest.json` changes.
 - Report artifacts are retained for 30 days; state history and unused inactive/cache data are
   retained for 90 days. Managed crash-orphaned staging data is pruned safely.
@@ -149,6 +158,13 @@ Populate the route cache and publish a newly ranked report with:
 ```bash
 uv run japan-housing commutes --routes-env-file .env
 uv run japan-housing notify-report --webhook-env-file .env
+```
+
+`bootstrap` and `run --force` make housing sources due immediately but preserve valid paid route
+cache entries. Only the explicit command below bypasses the route cache:
+
+```bash
+uv run japan-housing commutes --force --routes-env-file .env
 ```
 
 Bootstrap can sync one persistent latest-report message without alerting on existing listings:

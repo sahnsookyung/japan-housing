@@ -74,6 +74,19 @@ function anchorLabel() {
   return state.report?.ranking?.anchor_label || "configured midpoint";
 }
 
+function commuteText(item, mode) {
+  const observed = item[`${mode}_minutes_mean`];
+  const scored = item[`${mode}_minutes_scored`];
+  const coverage = Number(item[`${mode}_route_coverage`] || 0);
+  const anchorCount = Number(item.commute_anchor_count || 0);
+  const label = mode === "transit" ? "Transit" : "Bike";
+  const scoredText = Number.isFinite(scored) ? `${scored.toFixed(1)} scored` : "score unavailable";
+  if (Number.isFinite(observed)) {
+    return `${label} ${observed.toFixed(1)} min observed (${coverage}/${anchorCount}); ${scoredText}`;
+  }
+  return `${label} pending (0/${anchorCount}); ${scoredText}`;
+}
+
 function compareRank(left, right) {
   const leftKey = [...(left.rank_key || [999])];
   const rightKey = [...(right.rank_key || [999])];
@@ -159,13 +172,8 @@ function renderRows(records) {
     const distance = Number.isFinite(item.distance_to_anchor_km)
       ? `${item.distance_to_anchor_km.toFixed(2)} km to ${anchorLabel()}`
       : "Distance penalty applied";
-    const anchorCount = Number(item.commute_anchor_count || 0);
-    const transit = Number.isFinite(item.transit_minutes_mean)
-      ? `${item.transit_minutes_mean.toFixed(1)} min transit (${item.transit_route_coverage}/${anchorCount})`
-      : `Transit pending (0/${anchorCount})`;
-    const bicycle = Number.isFinite(item.bicycle_minutes_mean)
-      ? `${item.bicycle_minutes_mean.toFixed(1)} min bike (${item.bicycle_route_coverage}/${anchorCount})`
-      : `Bike pending (0/${anchorCount})`;
+    const transit = commuteText(item, "transit");
+    const bicycle = commuteText(item, "bicycle");
     row.append(node("td", {}, [
       node("strong", { text: Number.isFinite(priorityFor(item)) ? priorityFor(item).toFixed(2) : "Unknown" }),
       node("small", { text: distance }),
@@ -224,14 +232,10 @@ function renderCompare(records) {
       text: `Ranking cost ${yen(item.ranking_price_yen)} · ${(item.ranking_price_basis || "unknown").replaceAll("_", " ")}`,
     }));
     card.append(node("span", {
-      text: Number.isFinite(item.transit_minutes_mean)
-        ? `Transit mean ${item.transit_minutes_mean.toFixed(1)} min (${item.transit_route_coverage}/${item.commute_anchor_count})`
-        : "Transit routes pending",
+      text: commuteText(item, "transit"),
     }));
     card.append(node("span", {
-      text: Number.isFinite(item.bicycle_minutes_mean)
-        ? `Bicycle mean ${item.bicycle_minutes_mean.toFixed(1)} min (${item.bicycle_route_coverage}/${item.commute_anchor_count})`
-        : "Bicycle routes pending",
+      text: commuteText(item, "bicycle"),
     }));
     card.append(node("span", {
       text: `Priority ${Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "unknown"} · ${

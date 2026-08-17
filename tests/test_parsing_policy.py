@@ -13,7 +13,11 @@ from japan_housing.models import (
     HousingRecord,
     ListingRef,
 )
-from japan_housing.parsing import normalize_records
+from japan_housing.parsing import (
+    normalize_records,
+    oakhouse_snapshot_verified,
+    oakhouse_verified_empty,
+)
 from japan_housing.policy import classify, cost_scenario, policy_config_hash
 
 
@@ -83,6 +87,19 @@ def test_oakhouse_rooms_are_independent_and_vacant_only(
     after_window = classify(records[2], app_config.profile, app_config.ranking)
     assert after_window.name == "excluded"
     assert "available after landing window: 2026-10-01" in after_window.reasons
+
+
+def test_oakhouse_empty_inventory_requires_structural_evidence(project_root: Path) -> None:
+    document = (project_root / "tests" / "fixtures" / "oakhouse.html").read_text(encoding="utf-8")
+    drifted = document.replace("p-room__caset__row", "unknown-room-row")
+    closed = document.replace('data-status="vacancy"', 'data-status="novacancy"').replace(
+        'data-status="soon"', 'data-status="novacancy"'
+    )
+    partially_drifted = document.replace("p-room__caset__row", "unknown-room-row", 1)
+
+    assert not oakhouse_verified_empty(drifted)
+    assert oakhouse_verified_empty(closed)
+    assert not oakhouse_snapshot_verified(partially_drifted, 2)
 
 
 def test_oakhouse_uses_available_room_price_not_advertised_from_price(

@@ -29,7 +29,7 @@ from .notify import (
     notify_changes,
     sync_latest_report_message,
 )
-from .parsing import normalize_records
+from .parsing import normalize_records, oakhouse_snapshot_verified
 from .policy import classify
 from .report import PublishedReport, build_report_payload, prune_reports, publish_report
 from .routing import CommuteEnrichmentResult, enrich_commutes
@@ -56,6 +56,8 @@ class DetailResult:
     status: str
     etag: str = ""
     last_modified: str = ""
+    verified_empty: bool = False
+    snapshot_verified: bool = True
 
 
 def _run_id(prefix: str = "run") -> str:
@@ -95,22 +97,31 @@ def _bounded_map(
                 pending[executor.submit(function, next_value)] = next_value
 
 
-def _cache_ttl(ref: ListingRef, cache: CachedPage) -> timedelta:
+def _cache_ttl(ref: ListingRef, cache: CachedPage, config: AppConfig) -> timedelta:
     if ref.source_id == "oakhouse":
         return timedelta(hours=4)
-    if "eligible" in cache.classifications:
+    current_classifications = {
+        classify(
+            record,
+            config.profile,
+            config.ranking,
+            routing=config.routing,
+        ).name
+        for record in cache.records
+    }
+    if "eligible" in current_classifications:
         return timedelta(hours=4)
-    if "review" in cache.classifications:
+    if "review" in current_classifications:
         return timedelta(hours=12)
     return timedelta(days=7)
 
 
-def _cache_reusable(ref: ListingRef, cache: CachedPage | None) -> bool:
+def _cache_reusable(ref: ListingRef, cache: CachedPage | None, config: AppConfig) -> bool:
     if cache is None or cache.list_fingerprint != ref.list_fingerprint:
         return False
     if any(record.schema_version != HOUSING_RECORD_SCHEMA_VERSION for record in cache.records):
         return False
-    return datetime.now().astimezone() - cache.fetched_at <= _cache_ttl(ref, cache)
+    return datetime.now().astimezone() - cache.fetched_at <= _cache_ttl(ref, cache, config)
 
 
 def _stage_records(
@@ -203,9 +214,11 @@ def _run_source(
             raise ValueError("configured public entry pages produced no listing IDs")
 
         cache_by_id = {ref.external_id: store.lookup_cache(ref) for ref in refs}
-        invalid_refs = [
-            ref for ref in refs if not _cache_reusable(ref, cache_by_id[ref.external_id])
-        ]
+        reusable_by_id = {
+            ref.external_id: _cache_reusable(ref, cache_by_id[ref.external_id], config)
+            for ref in refs
+        }
+        invalid_refs = [ref for ref in refs if not reusable_by_id[ref.external_id]]
         retryable_refs = [ref for ref in invalid_refs if store.detail_attempt_due(ref)]
         metrics.detail_deferred = len(invalid_refs) - len(retryable_refs)
         network_refs = store.order_detail_refs(retryable_refs, cache_by_id)
@@ -219,7 +232,7 @@ def _run_source(
 
         for ref in refs:
             cache = cache_by_id[ref.external_id]
-            if _cache_reusable(ref, cache):
+            if reusable_by_id[ref.external_id]:
                 assert cache is not None
                 staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 metrics.detail_cache_hits += 1
@@ -247,11 +260,17 @@ def _run_source(
                     etag or cache.etag,
                     last_modified or cache.last_modified,
                 )
+            records = tuple(normalize_records(ref, spec.label, response.text))
+            oakhouse_snapshot_ok = spec.source_id != "oakhouse" or oakhouse_snapshot_verified(
+                response.text, len(records)
+            )
             return DetailResult(
-                tuple(normalize_records(ref, spec.label, response.text)),
+                records,
                 "fresh",
                 etag,
                 last_modified,
+                spec.source_id == "oakhouse" and not records and oakhouse_snapshot_ok,
+                oakhouse_snapshot_ok,
             )
 
         processed: set[str] = set()
@@ -271,7 +290,7 @@ def _run_source(
                 if cache:
                     staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
-            if result.status == "missing" or (not result.records and spec.source_id == "oakhouse"):
+            if result.status == "missing" or result.verified_empty:
                 verified_pages.add(ref.external_id)
                 metrics.explicit_closed += 1
                 store.record_detail_attempt(ref, "missing")
@@ -282,6 +301,12 @@ def _run_source(
                     etag=result.etag,
                     last_modified=result.last_modified,
                 )
+                continue
+            if not result.snapshot_verified:
+                metrics.parse_failures += 1
+                store.record_detail_attempt(ref, "parse_failure")
+                if cache:
+                    staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
             if not result.records:
                 metrics.parse_failures += 1
@@ -336,6 +361,12 @@ def _run_source(
             if metrics.detail_deferred:
                 reasons.append(f"{metrics.detail_deferred} detail retries are in backoff")
             error = "; ".join(reasons) + "; cached progress will resume automatically"
+        if spec.authoritative_disappearance and metrics.parse_failures and status == "healthy":
+            status = "partial"
+            error = (
+                f"{metrics.parse_failures} authoritative detail page(s) were ambiguous; "
+                "cached inventory was retained"
+            )
         failure_limit = max(3, math.ceil(max(1, metrics.detail_network) * 0.05))
         if metrics.parse_failures > failure_limit:
             status = "drifted"
@@ -403,6 +434,7 @@ def run_refresh(
     config: AppConfig,
     *,
     force: bool = False,
+    force_routes: bool = False,
     notify: bool = False,
     webhook_url: str | None = None,
     source_ids: frozenset[str] | None = None,
@@ -460,8 +492,14 @@ def run_refresh(
         ):
             raise RuntimeError("no valid source snapshot or last-known housing data is available")
         if config.routing.enabled and routes_api_key:
-            commute_result = enrich_commutes(store, config, routes_api_key, force=force)
+            commute_result = enrich_commutes(
+                store,
+                config,
+                routes_api_key,
+                force=force_routes,
+            )
         elif config.routing.enabled:
+            store.reclassify_active(config.profile, config.ranking, config.routing)
             coverage = store.commute_coverage(config.routing)
             commute_result = CommuteEnrichmentResult(
                 "cached" if coverage["coverage_ratio"] == 1.0 else "not_configured",

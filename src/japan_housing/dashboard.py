@@ -21,6 +21,19 @@ ASSETS = {
 }
 
 
+def host_header_is_loopback(value: str) -> bool:
+    try:
+        parsed = urlparse(f"//{value}")
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        not parsed.username
+        and not parsed.password
+        and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
+    )
+
+
 def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "JapanHousingDashboard/0.1"
@@ -52,8 +65,7 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def _valid_local_request(self) -> bool:
-            host = self.headers.get("Host", "").split(":", 1)[0].strip("[]").lower()
-            return host in {"127.0.0.1", "localhost", "::1"}
+            return host_header_is_loopback(self.headers.get("Host", ""))
 
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path

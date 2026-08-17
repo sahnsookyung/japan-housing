@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 PREFECTURE_COORDINATE_BOUNDS = {
     "Tokyo": (35.45, 36.00, 138.85, 140.15),
     "Kanagawa": (35.10, 35.75, 138.85, 139.90),

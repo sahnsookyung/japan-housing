@@ -281,11 +281,32 @@ def _report_content(payload: dict[str, object]) -> str:
         )
         transit = item.get("transit_minutes_mean")
         bicycle = item.get("bicycle_minutes_mean")
+        transit_scored = item.get("transit_minutes_scored")
+        bicycle_scored = item.get("bicycle_minutes_scored")
+        anchor_count = int(item.get("commute_anchor_count") or 0)
+        transit_coverage = int(item.get("transit_route_coverage") or 0)
+        bicycle_coverage = int(item.get("bicycle_route_coverage") or 0)
+        transit_scored_text = (
+            f"{float(transit_scored):.1f} scored"
+            if isinstance(transit_scored, int | float)
+            else "score unavailable"
+        )
+        bicycle_scored_text = (
+            f"{float(bicycle_scored):.1f} scored"
+            if isinstance(bicycle_scored, int | float)
+            else "score unavailable"
+        )
         transit_text = (
-            f"{transit:.1f} min transit" if isinstance(transit, int | float) else "transit pending"
+            f"{transit:.1f} min transit observed ({transit_coverage}/{anchor_count}); "
+            f"{transit_scored_text}"
+            if isinstance(transit, int | float)
+            else f"transit pending; {transit_scored_text}"
         )
         bicycle_text = (
-            f"{bicycle:.1f} min bike" if isinstance(bicycle, int | float) else "bike pending"
+            f"{bicycle:.1f} min bike observed ({bicycle_coverage}/{anchor_count}); "
+            f"{bicycle_scored_text}"
+            if isinstance(bicycle, int | float)
+            else f"bike pending; {bicycle_scored_text}"
         )
         lines.append(
             f"• [{_safe(item.get('title') or 'Untitled')[:90]}]({item.get('url')}) — "

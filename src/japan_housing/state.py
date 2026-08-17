@@ -22,7 +22,13 @@ from .models import (
     SourceMetrics,
     iso_now,
 )
-from .routing import RouteMatrixValue, RouteOrigin, anchor_key, origin_for
+from .routing import (
+    RouteMatrixValue,
+    RouteOrigin,
+    anchor_key,
+    origin_for,
+    transit_schedule_key,
+)
 from .sources import SourceSpec
 
 
@@ -226,6 +232,7 @@ class StateStore:
                 condition TEXT NOT NULL,
                 fetched_at TEXT NOT NULL,
                 departure_at TEXT NOT NULL DEFAULT '',
+                schedule_key TEXT NOT NULL DEFAULT '',
                 provider TEXT NOT NULL DEFAULT 'google_routes',
                 PRIMARY KEY(origin_key, anchor_key, mode)
             );
@@ -237,6 +244,7 @@ class StateStore:
         self._ensure_column("detail_cache", "last_modified", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("notifications", "attempt_count", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("notifications", "next_attempt_at", "TEXT")
+        self._ensure_column("commute_routes", "schedule_key", "TEXT NOT NULL DEFAULT ''")
         self.connection.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -695,11 +703,17 @@ class StateStore:
         if force:
             return origins
         cutoff = (datetime.now().astimezone() - timedelta(days=routing.cache_days)).isoformat()
+        schedule = transit_schedule_key(routing) if mode == "TRANSIT" else ""
+        schedule_clause = "AND schedule_key=?" if mode == "TRANSIT" else ""
+        parameters: tuple[object, ...] = (
+            (mode, cutoff, schedule) if mode == "TRANSIT" else (mode, cutoff)
+        )
         fresh = {
             (str(row["origin_key"]), str(row["anchor_key"]))
             for row in self.connection.execute(
-                "SELECT origin_key, anchor_key FROM commute_routes WHERE mode=? AND fetched_at>=?",
-                (mode, cutoff),
+                "SELECT origin_key, anchor_key FROM commute_routes "
+                f"WHERE mode=? AND fetched_at>=? {schedule_clause}",
+                parameters,
             ).fetchall()
         }
         required_anchors = {anchor_key(anchor) for anchor in routing.anchors}
@@ -718,8 +732,8 @@ class StateStore:
                 INSERT INTO commute_routes(
                     origin_key, origin_latitude, origin_longitude, anchor_key,
                     anchor_id, anchor_label, mode, duration_seconds, distance_meters,
-                    condition, fetched_at, departure_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    condition, fetched_at, departure_at, schedule_key
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(origin_key, anchor_key, mode) DO UPDATE SET
                     origin_latitude=excluded.origin_latitude,
                     origin_longitude=excluded.origin_longitude,
@@ -730,6 +744,7 @@ class StateStore:
                     condition=excluded.condition,
                     fetched_at=excluded.fetched_at,
                     departure_at=excluded.departure_at,
+                    schedule_key=excluded.schedule_key,
                     provider='google_routes'
                 """,
                 [
@@ -746,6 +761,7 @@ class StateStore:
                         value.condition,
                         value.fetched_at,
                         value.departure_at,
+                        value.schedule_key,
                     )
                     for value in values
                 ],
@@ -766,9 +782,11 @@ class StateStore:
             query = f"""
                 SELECT * FROM commute_routes
                 WHERE origin_key=? AND fetched_at>=? AND anchor_key IN ({placeholders})
+                  AND (mode='BICYCLE' OR (mode='TRANSIT' AND schedule_key=?))
             """
             for row in self.connection.execute(
-                query, (origin.key, cutoff, *current_anchor_keys)
+                query,
+                (origin.key, cutoff, *current_anchor_keys, transit_schedule_key(routing)),
             ).fetchall():
                 rows[(str(row["anchor_key"]), str(row["mode"]))] = row
 
@@ -850,8 +868,9 @@ class StateStore:
             f"""
             SELECT origin_key, anchor_key, mode, condition, duration_seconds FROM commute_routes
             WHERE fetched_at>=? AND anchor_key IN ({placeholders})
+              AND (mode='BICYCLE' OR (mode='TRANSIT' AND schedule_key=?))
             """,
-            (cutoff, *keys),
+            (cutoff, *keys, transit_schedule_key(routing)),
         ).fetchall()
         fresh = {
             (str(row["origin_key"]), str(row["anchor_key"]), str(row["mode"]))
