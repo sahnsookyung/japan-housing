@@ -44,7 +44,9 @@ def test_invalid_webhook_urls_are_rejected(url: str) -> None:
 
 def test_dashboard_assets_exist_in_checkout() -> None:
     root = _dashboard_assets()
-    assert {"index.html", "app.js", "styles.css"} <= {path.name for path in root.iterdir()}
+    assert {"index.html", "app.js", "housing-pareto.mjs", "styles.css"} <= {
+        path.name for path in root.iterdir()
+    }
 
 
 def test_report_message_shows_partial_sources_and_diverse_properties() -> None:

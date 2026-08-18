@@ -1,117 +1,203 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>Japan Housing</title>
-  <link rel="stylesheet" href="/styles.css">
-</head>
-<body>
-  <header class="site-header">
-    <div>
-      <p class="eyebrow">GREATER TOKYO · SEPTEMBER 2026</p>
-      <h1>Japan Housing</h1>
-      <p id="summary" class="summary">Loading the latest verified snapshot…</p>
-    </div>
-    <button id="refresh" type="button">Refresh report</button>
-  </header>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>japan-housing</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#results-panel">Skip to housing results</a>
 
-  <main>
-    <section class="notice" aria-label="Important reminder">
-      Confirm address registration, total fees, availability, and working-holiday eligibility before paying.
-      Bicycle routes are beta and may omit or misidentify suitable cycling paths; verify route safety.
-    </section>
-
-    <section class="filters" aria-labelledby="filter-heading">
-      <div class="section-heading">
-        <h2 id="filter-heading">Find the practical shortlist</h2>
-        <button id="reset" class="secondary" type="button">Reset filters</button>
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">JH</div>
+        <div>
+          <p class="eyebrow">HOUSING DECISION DESK</p>
+          <h1>japan-housing</h1>
+        </div>
       </div>
-      <div class="filter-grid">
-        <label>Search
-          <input id="query" type="search" placeholder="Area, station, property">
-        </label>
-        <label>Classification
-          <select id="classification">
-            <option value="actionable">Eligible + review</option>
-            <option value="eligible">Eligible</option>
-            <option value="review">Manual review</option>
-            <option value="excluded">Excluded</option>
-            <option value="all">All</option>
-          </select>
-        </label>
-        <label>Track
-          <select id="track">
-            <option value="all">Landing + long-term</option>
-            <option value="landing">Landing</option>
-            <option value="long_term">Long-term</option>
-            <option value="both">Both/unknown</option>
-          </select>
-        </label>
-        <label>Decision
-          <select id="decision">
-            <option value="all">All decisions</option>
-            <option value="new">New</option>
-            <option value="shortlisted">Shortlisted</option>
-            <option value="contacted">Contacted</option>
-            <option value="application_started">Application started</option>
-            <option value="reserved">Reserved</option>
-            <option value="not_interested">Not interested</option>
-          </select>
-        </label>
-        <label>Maximum recurring cost
-          <input id="max-cost" type="number" min="0" step="5000" value="80000">
-        </label>
-        <label>Priority view
-          <select id="ranking-view">
-            <option value="balanced">Balanced</option>
-            <option value="closer">Closer</option>
-            <option value="cheaper">Cheaper</option>
-            <option value="pareto">Pareto frontier</option>
-          </select>
-        </label>
+      <div class="topbar-actions">
+        <p id="refresh-state" class="refresh-state" aria-live="polite">Loading latest report…</p>
+        <button id="refresh" class="icon-button" type="button" aria-label="Reload report" title="Reload report">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+        </button>
       </div>
-    </section>
+    </header>
 
-    <section aria-labelledby="results-heading">
-      <div class="section-heading">
-        <h2 id="results-heading">Ranked housing</h2>
-        <p id="result-count" aria-live="polite"></p>
-      </div>
-      <div id="error" class="error" role="alert" hidden></div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Compare</th>
-              <th scope="col">Property</th>
-              <th scope="col">Priority</th>
-              <th scope="col">Monthly</th>
-              <th scope="col">Available</th>
-              <th scope="col">Registration</th>
-              <th scope="col">Decision</th>
-            </tr>
-          </thead>
-          <tbody id="results"></tbody>
-        </table>
-      </div>
-    </section>
+    <main>
+      <section class="hero" aria-labelledby="hero-heading">
+        <div>
+          <p class="eyebrow">GREATER TOKYO · 15–28 SEPTEMBER 2026</p>
+          <h2 id="hero-heading">Choose the practical trade-off.</h2>
+          <p id="summary">Loading the latest verified snapshot…</p>
+        </div>
+        <div class="anchor-card">
+          <span>COMMUTE CENTER</span>
+          <strong id="anchor-label">Kichijoji / Shibuya / Shinjuku midpoint</strong>
+          <small>Transit, bus, bicycle, and straight-line evidence</small>
+        </div>
+      </section>
 
-    <section id="compare-section" aria-labelledby="compare-heading" hidden>
-      <div class="section-heading">
-        <h2 id="compare-heading">Compare shortlist</h2>
-        <button id="clear-compare" class="secondary" type="button">Clear</button>
-      </div>
-      <div id="compare" class="compare-grid"></div>
-    </section>
+      <section class="notice" aria-label="Important reminder">
+        <strong>Verify before paying.</strong>
+        Confirm address registration, actual available-room fees, availability, and working-holiday eligibility with the provider. Bicycle routes are estimates and require a safety check.
+      </section>
 
-    <section aria-labelledby="fallback-heading">
-      <h2 id="fallback-heading">Manual fallbacks</h2>
-      <div id="fallbacks" class="fallback-grid"></div>
-    </section>
-  </main>
+      <section class="summary-strip" aria-label="Housing report summary">
+        <button id="summary-eligible-card" class="summary-card" type="button">
+          <span class="summary-icon" aria-hidden="true">✓</span>
+          <span><strong id="summary-eligible">—</strong><small>Eligible now</small></span>
+        </button>
+        <button id="summary-review-card" class="summary-card" type="button">
+          <span class="summary-icon warning" aria-hidden="true">!</span>
+          <span><strong id="summary-review">—</strong><small>Manual review</small></span>
+        </button>
+        <button id="summary-pareto-card" class="summary-card" type="button">
+          <span class="summary-icon frontier" aria-hidden="true">◇</span>
+          <span><strong id="summary-pareto">—</strong><small>Efficient choices</small></span>
+        </button>
+        <article class="summary-card static">
+          <span class="summary-icon route" aria-hidden="true">↗</span>
+          <span><strong id="summary-coverage">—</strong><small>Route coverage</small></span>
+        </article>
+      </section>
 
-  <script src="/app.js" defer></script>
-</body>
+      <section class="filter-panel" aria-labelledby="filter-heading">
+        <div class="filter-heading-row">
+          <div>
+            <p class="eyebrow">SHORTLIST CONTROLS</p>
+            <h2 id="filter-heading">Find the right room</h2>
+          </div>
+          <button id="reset" class="text-button" type="button">Reset filters</button>
+        </div>
+        <div class="filters">
+          <label class="field field-search">Search
+            <span class="input-shell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <input id="query" type="search" placeholder="Area, station, or property" aria-keyshortcuts="/">
+            </span>
+          </label>
+          <label class="field">Classification
+            <select id="classification">
+              <option value="actionable">Eligible + review</option>
+              <option value="eligible">Eligible</option>
+              <option value="review">Manual review</option>
+              <option value="excluded">Excluded</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <label class="field">Track
+            <select id="track">
+              <option value="all">Landing + long-term</option>
+              <option value="landing">Landing</option>
+              <option value="long_term">Long-term</option>
+              <option value="both">Both / unknown</option>
+            </select>
+          </label>
+          <label class="field">Decision
+            <select id="decision">
+              <option value="all">All decisions</option>
+              <option value="new">New</option>
+              <option value="shortlisted">Shortlisted</option>
+              <option value="contacted">Contacted</option>
+              <option value="application_started">Application started</option>
+              <option value="reserved">Reserved</option>
+              <option value="not_interested">Not interested</option>
+            </select>
+          </label>
+          <label class="field">Maximum recurring cost
+            <input id="max-cost" type="number" min="0" step="5000" value="80000">
+          </label>
+          <label class="field">Priority view
+            <select id="ranking-view">
+              <option value="balanced">Balanced</option>
+              <option value="closer">Closer</option>
+              <option value="cheaper">Cheaper</option>
+              <option value="pareto">Pareto frontier</option>
+            </select>
+          </label>
+        </div>
+        <p id="pareto-explainer" class="pareto-explainer">
+          Efficient choices minimize effective monthly price and normalized location burden. The location axis combines midpoint distance, transit/bus time, and bicycle time; missing routes retain their configured penalties.
+        </p>
+      </section>
+
+      <section class="workspace" aria-label="Housing results and Pareto chart">
+        <section id="results-panel" class="results-panel" aria-labelledby="results-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">RANKED RESULTS</p>
+              <h2 id="results-heading"><span id="result-count">0</span> homes</h2>
+            </div>
+            <span id="frontier-feedback" class="panel-note" aria-live="polite"></span>
+          </div>
+          <div id="error" class="error" role="alert" hidden></div>
+          <div class="table-scroll" tabindex="0">
+            <table>
+              <thead>
+                <tr>
+                  <th class="compare-heading" scope="col"><span aria-hidden="true">+</span><span class="sr-only">Add to comparison</span></th>
+                  <th scope="col">Property</th>
+                  <th scope="col">Monthly</th>
+                  <th scope="col">Location</th>
+                  <th scope="col">Availability</th>
+                  <th scope="col">Decision</th>
+                </tr>
+              </thead>
+              <tbody id="results"></tbody>
+            </table>
+            <div id="empty-state" class="empty-state" hidden>
+              <span aria-hidden="true">◎</span>
+              <h3>No homes match these filters</h3>
+              <p>Reset one or two controls to bring the shortlist back.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="pareto-panel" aria-labelledby="pareto-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">PRICE ↓ · LOCATION BURDEN ↓</p>
+              <h2 id="pareto-heading">Pareto frontier</h2>
+            </div>
+            <span id="pareto-total" class="frontier-pill">0 efficient</span>
+          </div>
+          <div id="pareto-chart" class="pareto-chart" role="group" aria-label="Interactive chart of effective monthly price and location burden"></div>
+          <article id="chart-detail" class="chart-detail" aria-live="polite">
+            Select a chart point to inspect its housing trade-off.
+          </article>
+          <p id="pareto-caption" class="panel-caption">Only eligible, still-actionable homes with comparable metrics enter the frontier.</p>
+        </section>
+      </section>
+
+      <section id="compare-section" class="compare-section" aria-labelledby="compare-heading" hidden>
+        <div class="filter-heading-row">
+          <div>
+            <p class="eyebrow">SHORTLIST</p>
+            <h2 id="compare-heading">Compare up to three homes</h2>
+          </div>
+          <button id="clear-compare" class="text-button" type="button">Clear comparison</button>
+        </div>
+        <div id="compare" class="compare-grid"></div>
+      </section>
+
+      <section class="operations-grid">
+        <section class="source-panel" aria-labelledby="source-heading">
+          <div class="filter-heading-row">
+            <div><p class="eyebrow">PIPELINE HEALTH</p><h2 id="source-heading">Housing sources</h2></div>
+          </div>
+          <div id="source-health" class="source-health"></div>
+        </section>
+        <section class="fallback-panel" aria-labelledby="fallback-heading">
+          <div class="filter-heading-row">
+            <div><p class="eyebrow">MANUAL COVERAGE</p><h2 id="fallback-heading">Fallback searches</h2></div>
+          </div>
+          <div id="fallbacks" class="fallback-grid"></div>
+        </section>
+      </section>
+    </main>
+  </body>
 </html>

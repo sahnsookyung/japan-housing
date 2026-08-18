@@ -1,5 +1,11 @@
 "use strict";
 
+import {
+  housingParetoFrontierIds,
+  housingParetoPoints,
+} from "/housing-pareto.mjs";
+
+const SVG_NS = "http://www.w3.org/2000/svg";
 const controls = {
   query: document.querySelector("#query"),
   classification: document.querySelector("#classification"),
@@ -8,7 +14,11 @@ const controls = {
   maxCost: document.querySelector("#max-cost"),
   rankingView: document.querySelector("#ranking-view"),
 };
-const state = { report: null, selected: new Set() };
+const state = {
+  report: null,
+  selected: new Set(),
+  focusedKey: "",
+};
 
 function node(tag, options = {}, children = []) {
   const element = document.createElement(tag);
@@ -19,6 +29,13 @@ function node(tag, options = {}, children = []) {
   if (options.title) element.title = options.title;
   if (options.ariaLabel) element.setAttribute("aria-label", options.ariaLabel);
   for (const child of children) element.append(child);
+  return element;
+}
+
+function svgNode(tag, attributes = {}, text = "") {
+  const element = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, String(value));
+  if (text) element.textContent = text;
   return element;
 }
 
@@ -37,7 +54,7 @@ function safeLink(url, label) {
 }
 
 function yen(value) {
-  return Number.isInteger(value) ? `¥${value.toLocaleString()}` : "Unknown";
+  return Number.isFinite(value) ? `¥${Math.round(value).toLocaleString()}` : "Unknown";
 }
 
 function listingText(item) {
@@ -50,7 +67,7 @@ function listingText(item) {
   ].join(" ").toLocaleLowerCase();
 }
 
-function matches(item) {
+function matchesBase(item) {
   const query = controls.query.value.trim().toLocaleLowerCase();
   const classification = controls.classification.value;
   const maxCost = Number(controls.maxCost.value || 0);
@@ -60,7 +77,6 @@ function matches(item) {
   if (controls.track.value !== "all" && item.track !== controls.track.value) return false;
   if (controls.decision.value !== "all" && item.decision_status !== controls.decision.value) return false;
   if (maxCost && (!Number.isInteger(item.recurring_total_yen) || item.recurring_total_yen > maxCost)) return false;
-  if (controls.rankingView.value === "pareto" && !item.pareto_frontier) return false;
   return true;
 }
 
@@ -79,15 +95,24 @@ function commuteText(item, mode) {
   const scored = item[`${mode}_minutes_scored`];
   const coverage = Number(item[`${mode}_route_coverage`] || 0);
   const anchorCount = Number(item.commute_anchor_count || 0);
-  const label = mode === "transit" ? "Transit" : "Bike";
-  const scoredText = Number.isFinite(scored) ? `${scored.toFixed(1)} scored` : "score unavailable";
+  const label = mode === "transit" ? "Transit / bus" : "Bicycle";
+  const scoredText = Number.isFinite(scored) ? `${scored.toFixed(1)} min ranked` : "ranking unavailable";
   if (Number.isFinite(observed)) {
-    return `${label} ${observed.toFixed(1)} min observed (${coverage}/${anchorCount}); ${scoredText}`;
+    return `${label}: ${observed.toFixed(1)} min observed (${coverage}/${anchorCount}); ${scoredText}`;
   }
-  return `${label} pending (0/${anchorCount}); ${scoredText}`;
+  return `${label}: pending (${coverage}/${anchorCount}); ${scoredText}`;
 }
 
 function compareRank(left, right) {
+  if (controls.rankingView.value === "pareto") {
+    return (
+      (left.pareto_location_score ?? Number.POSITIVE_INFINITY) -
+        (right.pareto_location_score ?? Number.POSITIVE_INFINITY) ||
+      (left.ranking_price_yen ?? Number.POSITIVE_INFINITY) -
+        (right.ranking_price_yen ?? Number.POSITIVE_INFINITY) ||
+      String(left.stable_key).localeCompare(String(right.stable_key))
+    );
+  }
   const leftKey = [...(left.rank_key || [999])];
   const rightKey = [...(right.rank_key || [999])];
   leftKey[3] = priorityFor(left);
@@ -101,19 +126,20 @@ function compareRank(left, right) {
   return 0;
 }
 
-function detailBlock(item) {
+function detailBlock(item, frontier) {
   const wrap = node("div", { className: "property-cell" });
-  wrap.append(safeLink(item.url, item.title || "Untitled housing"));
-  wrap.append(node("span", {
-    className: `badge ${item.classification}`,
+  const badges = node("div", { className: "badge-row" });
+  badges.append(node("span", {
+    className: `badge badge-${item.classification}`,
     text: `${item.classification} · ${item.track}`,
   }));
+  if (frontier) badges.append(node("span", { className: "badge badge-frontier", text: "Pareto" }));
+  wrap.append(badges);
+  wrap.append(safeLink(item.url, item.title || "Untitled housing"));
   const location = [item.prefecture, item.city].filter(Boolean).join(" ") || "Location unverified";
   wrap.append(node("small", { text: location }));
-  if (item.nearest_stations?.length) {
-    wrap.append(node("small", { text: item.nearest_stations.join(" · ") }));
-  }
-  const checks = (item.cautions || []).slice(0, 3);
+  if (item.nearest_stations?.length) wrap.append(node("small", { text: item.nearest_stations.join(" · ") }));
+  const checks = (item.cautions || []).slice(0, 2);
   if (checks.length) wrap.append(node("small", { className: "caution", text: checks.join(" · ") }));
   return wrap;
 }
@@ -133,7 +159,8 @@ function decisionControl(item) {
         headers: { "Content-Type": "application/json", "X-Japan-Housing": "1" },
         body: JSON.stringify({ stable_key: item.stable_key, status: select.value }),
       });
-      if (!response.ok) throw new Error((await response.json()).error || "Decision update failed");
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Decision update failed");
       item.decision_status = select.value;
       render();
     } catch (error) {
@@ -149,64 +176,67 @@ function compareButton(item) {
   const selected = state.selected.has(item.stable_key);
   const button = node("button", {
     type: "button",
-    className: selected ? "compare active" : "compare",
-    text: selected ? "Added" : "Add",
+    className: "compare-toggle",
+    text: selected ? "✓" : "+",
     ariaLabel: `${selected ? "Remove" : "Add"} ${item.title} ${selected ? "from" : "to"} comparison`,
+    title: selected ? "Remove from comparison" : "Add to comparison",
   });
+  button.setAttribute("aria-pressed", String(selected));
   button.addEventListener("click", () => {
     if (selected) state.selected.delete(item.stable_key);
     else if (state.selected.size < 3) state.selected.add(item.stable_key);
-    else showError("Compare up to three listings at a time.");
+    else showError("Compare up to three homes at a time.");
     render();
   });
   return button;
 }
 
-function renderRows(records) {
+function renderRows(records, frontierIds) {
   const body = document.querySelector("#results");
   body.replaceChildren();
+  document.querySelector("#empty-state").hidden = records.length !== 0;
   for (const item of records) {
-    const row = node("tr");
-    row.append(node("td", {}, [compareButton(item)]));
-    row.append(node("td", {}, [detailBlock(item)]));
-    const distance = Number.isFinite(item.distance_to_anchor_km)
-      ? `${item.distance_to_anchor_km.toFixed(2)} km to ${anchorLabel()}`
-      : "Distance penalty applied";
-    const transit = commuteText(item, "transit");
-    const bicycle = commuteText(item, "bicycle");
-    row.append(node("td", {}, [
-      node("strong", { text: Number.isFinite(priorityFor(item)) ? priorityFor(item).toFixed(2) : "Unknown" }),
-      node("small", { text: distance }),
-      node("small", { text: transit }),
-      node("small", { text: bicycle }),
-      node("small", { text: item.pareto_frontier ? "Pareto frontier" : controls.rankingView.options[controls.rankingView.selectedIndex].text }),
-    ]));
-    const monthly = node("td");
-    monthly.append(node("strong", { text: yen(item.recurring_total_yen) }));
+    const frontier = frontierIds.has(item.stable_key);
+    const row = node("tr", { className: frontier ? "is-frontier" : "" });
+    row.dataset.stableKey = item.stable_key;
+    row.append(node("td", { className: "compare-cell" }, [compareButton(item)]));
+    row.append(node("td", {}, [detailBlock(item, frontier)]));
+
+    const monthly = node("td", { className: "cost-cell" });
+    monthly.append(node("strong", { text: `${yen(item.ranking_price_yen)} effective` }));
+    monthly.append(node("small", { text: `${yen(item.recurring_total_yen)} recurring` }));
+    monthly.append(node("small", { text: `Initial: ${yen(item.initial_cost_yen)}` }));
     if (item.source_id === "oakhouse") {
       monthly.append(node("small", {
-        text: `Available room: rent ${yen(item.rent_yen)} + maintenance ${yen(item.management_fee_yen)}`,
-      }));
-      if (Number.isInteger(item.advertised_monthly_from_yen)) {
-        monthly.append(node("small", {
-          className: item.advertised_monthly_from_yen === item.recurring_total_yen ? "" : "caution",
-          text: `Property advertised from ${yen(item.advertised_monthly_from_yen)}`,
-        }));
-      }
-      monthly.append(node("small", {
-        text: `Validation: ${item.price_validation || "unknown"}`,
+        className: Number.isInteger(item.advertised_monthly_from_yen) && item.advertised_monthly_from_yen !== item.recurring_total_yen ? "caution" : "",
+        text: `Advertised from ${yen(item.advertised_monthly_from_yen)} · ${item.price_validation || "unvalidated"}`,
       }));
     }
-    monthly.append(node("small", { text: `Initial: ${yen(item.initial_cost_yen)}` }));
     row.append(monthly);
-    row.append(node("td", { text: item.available_text || item.available_from || "Confirm" }));
-    row.append(node("td", {}, [
+
+    const location = node("td", { className: "location-cell" });
+    location.append(node("strong", {
+      text: Number.isFinite(item.pareto_location_score)
+        ? `${item.pareto_location_score.toFixed(2)} burden`
+        : "Location unavailable",
+    }));
+    location.append(node("small", {
+      text: Number.isFinite(item.distance_to_anchor_km)
+        ? `${item.distance_to_anchor_km.toFixed(2)} km to midpoint`
+        : "Distance penalty applied",
+    }));
+    location.append(node("small", { text: commuteText(item, "transit") }));
+    location.append(node("small", { text: commuteText(item, "bicycle") }));
+    row.append(location);
+
+    row.append(node("td", { className: "availability-cell" }, [
+      node("strong", { text: item.available_text || item.available_from || "Confirm" }),
       node("span", {
-        className: `registration ${item.registration_confidence || "unknown"}`,
-        text: item.registration_confidence || "unknown",
+        className: `registration registration-${item.registration_confidence || "unknown"}`,
+        text: `Registration ${item.registration_confidence || "unknown"}`,
       }),
     ]));
-    row.append(node("td", {}, [decisionControl(item)]));
+    row.append(node("td", { className: "decision-cell" }, [decisionControl(item)]));
     body.append(row);
   }
 }
@@ -214,50 +244,142 @@ function renderRows(records) {
 function scenarioText(item) {
   const scenario = item.track === "landing" ? item.landing_90 : item.long_term;
   if (!scenario) return "Scenario unavailable";
-  const complete = scenario.complete ? "complete" : `check: ${(scenario.unknown_costs || []).join(", ")}`;
+  const complete = scenario.complete ? "complete" : `check ${(scenario.unknown_costs || []).join(", ")}`;
   return `${scenario.months} months: ${yen(scenario.known_total_yen)} · ${complete}`;
 }
 
-function renderCompare(records) {
+function renderCompare() {
   const section = document.querySelector("#compare-section");
   const container = document.querySelector("#compare");
-  const selected = records.filter((item) => state.selected.has(item.stable_key));
+  const selected = (state.report?.housing || []).filter((item) => state.selected.has(item.stable_key));
   section.hidden = selected.length === 0;
   container.replaceChildren();
   for (const item of selected) {
     const card = node("article", { className: "compare-card" });
     card.append(safeLink(item.url, item.title));
-    card.append(node("strong", { text: `${yen(item.recurring_total_yen)}/month` }));
+    card.append(node("strong", { text: `${yen(item.ranking_price_yen)} effective / month` }));
+    card.append(node("span", { text: `${yen(item.recurring_total_yen)} recurring · ${scenarioText(item)}` }));
+    card.append(node("span", { text: commuteText(item, "transit") }));
+    card.append(node("span", { text: commuteText(item, "bicycle") }));
     card.append(node("span", {
-      text: `Ranking cost ${yen(item.ranking_price_yen)} · ${(item.ranking_price_basis || "unknown").replaceAll("_", " ")}`,
+      text: `${Number.isFinite(item.distance_to_anchor_km) ? `${item.distance_to_anchor_km.toFixed(2)} km` : "distance penalty"} · location burden ${Number.isFinite(item.pareto_location_score) ? item.pareto_location_score.toFixed(2) : "unknown"}`,
     }));
-    card.append(node("span", {
-      text: commuteText(item, "transit"),
-    }));
-    card.append(node("span", {
-      text: commuteText(item, "bicycle"),
-    }));
-    card.append(node("span", {
-      text: `Priority ${Number.isFinite(item.priority_score) ? item.priority_score.toFixed(2) : "unknown"} · ${
-        Number.isFinite(item.distance_to_anchor_km)
-          ? `${item.distance_to_anchor_km.toFixed(2)} km straight-line to ${anchorLabel()}`
-          : "distance penalty applied"
-      }`,
-    }));
-    if (item.source_id === "oakhouse") {
-      card.append(node("span", {
-        text: `Available room: ${yen(item.rent_yen)} rent + ${yen(item.management_fee_yen)} maintenance`,
-      }));
-      card.append(node("span", {
-        text: `Advertised from: ${yen(item.advertised_monthly_from_yen)} · validation: ${item.price_validation}`,
-      }));
-    }
-    card.append(node("span", { text: scenarioText(item) }));
     card.append(node("span", { text: `Available: ${item.available_text || "confirm"}` }));
-    card.append(node("span", { text: `Registration: ${item.registration_confidence}` }));
-    card.append(node("span", { text: `Source: ${item.source_label}` }));
+    card.append(node("span", { text: `Registration: ${item.registration_confidence || "unknown"}` }));
     container.append(card);
   }
+}
+
+function chartDetail(item, frontier) {
+  const container = document.querySelector("#chart-detail");
+  container.replaceChildren();
+  if (!item) {
+    container.textContent = "Select a chart point to inspect its housing trade-off.";
+    return;
+  }
+  container.append(node("span", { className: frontier ? "badge badge-frontier" : "badge", text: frontier ? "Pareto frontier" : "Comparable" }));
+  container.append(safeLink(item.url, item.title || "Untitled housing"));
+  container.append(node("strong", { text: `${yen(item.ranking_price_yen)} effective · ${item.pareto_location_score.toFixed(2)} location burden` }));
+  container.append(node("small", { text: `${item.track} · ${item.city || item.prefecture || "location unverified"}` }));
+}
+
+function scale(value, minimum, maximum, start, end) {
+  if (maximum === minimum) return (start + end) / 2;
+  return start + ((value - minimum) / (maximum - minimum)) * (end - start);
+}
+
+function renderPareto(records, frontierIds) {
+  const container = document.querySelector("#pareto-chart");
+  const points = housingParetoPoints(records, frontierIds);
+  container.replaceChildren();
+  document.querySelector("#pareto-total").textContent = `${frontierIds.size} efficient`;
+  const focused = points.find((point) => point.stableKey === state.focusedKey);
+  if (!points.length) {
+    container.append(node("div", { className: "chart-empty", text: "No eligible homes with comparable price and location metrics." }));
+    chartDetail(null, false);
+    return;
+  }
+
+  const width = 680;
+  const height = 430;
+  const padding = { top: 28, right: 28, bottom: 58, left: 78 };
+  const prices = points.map((point) => point.price);
+  const locations = points.map((point) => point.location);
+  const rawPriceMin = Math.min(...prices);
+  const rawPriceMax = Math.max(...prices);
+  const rawLocationMin = Math.min(...locations);
+  const rawLocationMax = Math.max(...locations);
+  const priceMargin = Math.max(5_000, (rawPriceMax - rawPriceMin) * 0.08);
+  const locationMargin = Math.max(5, (rawLocationMax - rawLocationMin) * 0.08);
+  const priceMin = Math.max(0, rawPriceMin - priceMargin);
+  const priceMax = rawPriceMax + priceMargin;
+  const locationMin = Math.max(0, rawLocationMin - locationMargin);
+  const locationMax = rawLocationMax + locationMargin;
+  const x = (value) => scale(value, locationMin, locationMax, padding.left, width - padding.right);
+  const y = (value) => scale(value, priceMin, priceMax, height - padding.bottom, padding.top);
+
+  const svg = svgNode("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    role: "img",
+    "aria-label": `${points.length} comparable homes; ${frontierIds.size} are on the Pareto frontier`,
+  });
+  for (let index = 0; index <= 4; index += 1) {
+    const ratio = index / 4;
+    const xPosition = padding.left + ratio * (width - padding.left - padding.right);
+    const yPosition = padding.top + ratio * (height - padding.top - padding.bottom);
+    svg.append(svgNode("line", { x1: xPosition, y1: padding.top, x2: xPosition, y2: height - padding.bottom, class: "chart-grid" }));
+    svg.append(svgNode("line", { x1: padding.left, y1: yPosition, x2: width - padding.right, y2: yPosition, class: "chart-grid" }));
+    svg.append(svgNode("text", { x: xPosition, y: height - 31, class: "chart-tick", "text-anchor": "middle" }, (locationMin + ratio * (locationMax - locationMin)).toFixed(0)));
+    svg.append(svgNode("text", { x: padding.left - 10, y: yPosition + 4, class: "chart-tick", "text-anchor": "end" }, yen(priceMax - ratio * (priceMax - priceMin))));
+  }
+  svg.append(svgNode("text", { x: (padding.left + width - padding.right) / 2, y: height - 8, class: "chart-axis", "text-anchor": "middle" }, "Normalized location burden (lower is better)"));
+  const yLabel = svgNode("text", { x: 18, y: height / 2, class: "chart-axis", "text-anchor": "middle", transform: `rotate(-90 18 ${height / 2})` }, "Effective monthly price (lower is better)");
+  svg.append(yLabel);
+
+  const tracks = new Map();
+  for (const point of points.filter((entry) => entry.frontier)) {
+    if (!tracks.has(point.track)) tracks.set(point.track, []);
+    tracks.get(point.track).push(point);
+  }
+  for (const frontier of tracks.values()) {
+    frontier.sort((left, right) => left.location - right.location || left.price - right.price);
+    if (frontier.length > 1) {
+      svg.append(svgNode("polyline", {
+        points: frontier.map((point) => `${x(point.location)},${y(point.price)}`).join(" "),
+        class: "frontier-line",
+      }));
+    }
+  }
+
+  for (const point of points) {
+    const circle = svgNode("circle", {
+      cx: x(point.location),
+      cy: y(point.price),
+      r: point.frontier ? 7 : 4.5,
+      class: `${point.frontier ? "chart-point chart-point-frontier" : "chart-point"}${point.stableKey === state.focusedKey ? " is-focused" : ""}`,
+      tabindex: "0",
+      role: "button",
+      "data-stable-key": point.stableKey,
+      "data-frontier": String(point.frontier),
+      "aria-label": `${point.item.title}; ${yen(point.price)} effective monthly; ${point.location.toFixed(2)} location burden; ${point.frontier ? "Pareto frontier" : "comparable"}`,
+    });
+    circle.append(svgNode("title", {}, `${point.item.title} · ${yen(point.price)} · burden ${point.location.toFixed(2)}`));
+    const selectPoint = () => {
+      state.focusedKey = point.stableKey;
+      renderPareto(records, frontierIds);
+      document.querySelector(`tr[data-stable-key="${CSS.escape(point.stableKey)}"]`)?.scrollIntoView({ block: "nearest" });
+    };
+    circle.addEventListener("click", selectPoint);
+    circle.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectPoint();
+      }
+    });
+    svg.append(circle);
+  }
+  container.append(svg);
+  chartDetail(focused?.item || null, focused?.frontier || false);
 }
 
 function renderFallbacks() {
@@ -271,6 +393,33 @@ function renderFallbacks() {
   }
 }
 
+function renderSourceHealth() {
+  const container = document.querySelector("#source-health");
+  container.replaceChildren();
+  for (const item of state.report?.source_health || []) {
+    const status = item.last_status || "not run";
+    const card = node("article", { className: "source-card" });
+    card.append(node("span", { className: `status-dot status-${status}`, ariaLabel: status }));
+    card.append(node("strong", { text: item.label || item.source_id }));
+    card.append(node("small", { text: status.replaceAll("_", " ") }));
+    container.append(card);
+  }
+}
+
+function renderSummary() {
+  const counts = state.report?.classification_counts || {};
+  const coverage = Math.round((state.report?.commute_coverage?.coverage_ratio || 0) * 100);
+  document.querySelector("#summary-eligible").textContent = counts.eligible || 0;
+  document.querySelector("#summary-review").textContent = counts.review || 0;
+  document.querySelector("#summary-pareto").textContent = state.report?.ranking?.pareto?.frontier_count || 0;
+  document.querySelector("#summary-coverage").textContent = `${coverage}%`;
+  document.querySelector("#anchor-label").textContent = anchorLabel();
+  document.querySelector("#summary").textContent =
+    `${state.report.housing_count} listings · ${state.report.status} snapshot · updated ${state.report.generated_at}`;
+  document.querySelector("#refresh-state").textContent =
+    `${state.report.status} · ${coverage}% routes`;
+}
+
 function showError(message) {
   const box = document.querySelector("#error");
   box.textContent = message;
@@ -280,19 +429,32 @@ function showError(message) {
 function render() {
   if (!state.report) return;
   showError("");
-  const records = (state.report.housing || []).filter(matches).sort(compareRank);
-  document.querySelector("#result-count").textContent = `${records.length} shown`;
-  document.querySelector("#summary").textContent =
-    `${state.report.housing_count} listings · ${state.report.status} snapshot · ` +
-    `${Math.round((state.report.commute_coverage?.coverage_ratio || 0) * 100)}% commute coverage · ` +
-    `updated ${state.report.generated_at}`;
-  renderRows(records);
-  renderCompare(state.report.housing || []);
+  const baseRecords = (state.report.housing || []).filter(matchesBase);
+  const frontierIds = housingParetoFrontierIds(baseRecords);
+  const records = (controls.rankingView.value === "pareto"
+    ? baseRecords.filter((item) => frontierIds.has(item.stable_key))
+    : baseRecords
+  ).sort(compareRank);
+
+  document.querySelector("#result-count").textContent = records.length;
+  document.querySelector("#frontier-feedback").textContent =
+    `${records.length} shown · ${frontierIds.size} efficient among ${baseRecords.length} filtered`;
+  const routeCoverage = Math.round((state.report.commute_coverage?.coverage_ratio || 0) * 100);
+  document.querySelector("#pareto-caption").textContent = routeCoverage === 100
+    ? "Location burden uses complete transit/bus, bicycle, and midpoint-distance evidence. Frontiers are recomputed after every filter."
+    : `Route coverage is ${routeCoverage}%; missing route elements retain configured penalties. Frontiers are recomputed after every filter.`;
+
+  renderRows(records, frontierIds);
+  renderPareto(baseRecords, frontierIds);
+  renderCompare();
+  renderSummary();
   renderFallbacks();
+  renderSourceHealth();
 }
 
 async function load() {
   showError("");
+  document.querySelector("#refresh-state").textContent = "Refreshing report…";
   try {
     const response = await fetch("/api/report", { cache: "no-store" });
     const payload = await response.json();
@@ -300,12 +462,14 @@ async function load() {
     state.report = payload;
     for (const [name, weights] of Object.entries(payload.ranking?.variants || {})) {
       const option = controls.rankingView.querySelector(`option[value="${name}"]`);
-      if (option) option.textContent = `${name[0].toUpperCase()}${name.slice(1)}: ${Math.round(weights.price_weight * 100)}% price`;
+      if (option) option.textContent = `${name[0].toUpperCase()}${name.slice(1)} · ${Math.round(weights.price_weight * 100)}% price`;
     }
     const keys = new Set((payload.housing || []).map((item) => item.stable_key));
     state.selected = new Set([...state.selected].filter((key) => keys.has(key)));
+    if (!keys.has(state.focusedKey)) state.focusedKey = "";
     render();
   } catch (error) {
+    document.querySelector("#refresh-state").textContent = "Report unavailable";
     showError(error.message);
   }
 }
@@ -324,6 +488,27 @@ document.querySelector("#reset").addEventListener("click", () => {
 document.querySelector("#clear-compare").addEventListener("click", () => {
   state.selected.clear();
   render();
+});
+document.querySelector("#summary-eligible-card").addEventListener("click", () => {
+  controls.classification.value = "eligible";
+  controls.rankingView.value = "balanced";
+  render();
+});
+document.querySelector("#summary-review-card").addEventListener("click", () => {
+  controls.classification.value = "review";
+  controls.rankingView.value = "balanced";
+  render();
+});
+document.querySelector("#summary-pareto-card").addEventListener("click", () => {
+  controls.classification.value = "eligible";
+  controls.rankingView.value = "pareto";
+  render();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
+    event.preventDefault();
+    controls.query.focus();
+  }
 });
 
 load();

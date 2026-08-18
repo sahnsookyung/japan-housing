@@ -14,6 +14,7 @@ from typing import Any
 
 from .config import AppConfig
 from .models import SourceRunResult, iso_now
+from .pareto import annotate_pareto_frontier
 from .state import StateStore
 
 
@@ -32,40 +33,6 @@ def _source_status_map(health: list[dict[str, Any]]) -> dict[str, str]:
     return {str(item["source_id"]): str(item.get("last_status") or "not_run") for item in health}
 
 
-def _mark_pareto_frontier(records: list[dict[str, Any]]) -> int:
-    dimensions = (
-        "ranking_price_yen",
-        "distance_to_anchor_km",
-        "transit_minutes_scored",
-        "bicycle_minutes_scored",
-    )
-    candidates = [
-        item
-        for item in records
-        if item.get("classification") == "eligible"
-        and all(isinstance(item.get(name), int | float) for name in dimensions)
-    ]
-    count = 0
-    for item in records:
-        item["pareto_frontier"] = False
-    for item in candidates:
-        values = tuple(float(item[name]) for name in dimensions)
-        dominated = any(
-            other is not item
-            and all(
-                float(other[name]) <= value for name, value in zip(dimensions, values, strict=True)
-            )
-            and any(
-                float(other[name]) < value for name, value in zip(dimensions, values, strict=True)
-            )
-            for other in candidates
-        )
-        if not dominated:
-            item["pareto_frontier"] = True
-            count += 1
-    return count
-
-
 def build_report_payload(
     store: StateStore,
     run_id: str,
@@ -80,7 +47,7 @@ def build_report_payload(
     for item in records:
         item["source_status"] = statuses.get(str(item.get("source_id")), "unknown")
     records.sort(key=lambda item: tuple(item.get("rank_key") or (999, str(item.get("stable_key")))))
-    pareto_count = _mark_pareto_frontier(records)
+    pareto = annotate_pareto_frontier(records, config.ranking)
     counts = {name: 0 for name in ("eligible", "review", "excluded")}
     tracks = {name: 0 for name in ("landing", "long_term", "both")}
     for item in records:
@@ -101,7 +68,7 @@ def build_report_payload(
         else "partial"
     )
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "run_id": run_id,
         "generated_at": iso_now(),
         "status": status,
@@ -145,7 +112,24 @@ def build_report_payload(
                 },
                 "cheaper": {"price_weight": 0.80, "location_weight": 0.20},
             },
-            "pareto_frontier_count": pareto_count,
+            "pareto_frontier_count": pareto.frontier_count,
+            "pareto": {
+                "direction": "minimize_effective_monthly_price_and_location_burden",
+                "price_metric": "ranking_price_yen",
+                "location_metric": "pareto_location_score",
+                "location_inputs": [
+                    "midpoint_distance",
+                    "mean_public_transit_across_anchors",
+                    "mean_bicycle_time_across_anchors",
+                ],
+                "cohort": "housing_track",
+                "candidate_classification": "eligible",
+                "excluded_decisions": ["reserved", "not_interested"],
+                "candidate_count": pareto.candidate_count,
+                "frontier_count": pareto.frontier_count,
+                "cohort_counts": pareto.cohort_counts,
+                "complexity": "O(n log n)",
+            },
             "reclassified_records": reclassified,
             "long_term_comparison_months": config.profile.long_term_comparison_months,
         },
@@ -232,6 +216,12 @@ def _markdown(payload: dict[str, Any]) -> str:
             f"> Complete landing listings use three-month effective monthly cost; complete "
             f"long-term listings use the {ranking['long_term_comparison_months']}-month "
             "effective monthly cost. Incomplete totals remain explicitly separated."
+        ),
+        (
+            f"> Pareto frontier: {ranking['pareto']['frontier_count']} of "
+            f"{ranking['pareto']['candidate_count']} eligible, still-actionable candidates. "
+            "Effective monthly price and normalized location burden are both minimized within "
+            "each housing track."
         ),
         "",
     ]
@@ -364,7 +354,9 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "priority_bicycle_component",
         "priority_closer_score",
         "priority_cheaper_score",
+        "pareto_candidate",
         "pareto_frontier",
+        "pareto_location_score",
         "distance_to_anchor_km",
         "transit_minutes_mean",
         "bicycle_minutes_mean",

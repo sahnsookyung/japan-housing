@@ -177,10 +177,18 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     csv_text = published.csv_path.read_text(encoding="utf-8")
     assert "advertised_monthly_from_yen" in csv_text.splitlines()[0]
     assert "priority_score" in csv_text.splitlines()[0]
+    assert "pareto_location_score" in csv_text.splitlines()[0]
+    assert latest["schema_version"] == 5
+    assert latest["ranking"]["pareto"]["complexity"] == "O(n log n)"
+    assert latest["ranking"]["pareto"]["candidate_count"] == 1
+    assert latest["housing"][0]["pareto_candidate"] is True
+    assert latest["housing"][0]["pareto_frontier"] is True
+    assert isinstance(latest["housing"][0]["pareto_location_score"], float)
     assert csv_text.splitlines()[1].startswith("eligible")
     assert "'=formula-like title" in csv_text
     markdown = published.markdown_path.read_text(encoding="utf-8")
     assert "ranking mean 90.0 min including missing-route penalties" in markdown
+    assert "Pareto frontier: 1 of 1" in markdown
     manifest = json.loads((published.directory / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"housing.json", "housing.md", "housing.csv"}
     with pytest.raises(RuntimeError, match="already exists"):
