@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   housingParetoCandidate,
   housingParetoFrontierIds,
+  housingParetoLocation,
   housingParetoPoints,
 } from "../web/housing-pareto.mjs";
 
@@ -69,4 +70,31 @@ test("filtered records recompute the frontier", () => {
   const filtered = records.filter((item) => item.stable_key !== "dominant");
   assert.deepEqual([...housingParetoFrontierIds(filtered)], ["revealed-after-filter"]);
   assert.equal(housingParetoPoints(filtered)[0].frontier, true);
+});
+
+test("each commute perspective computes an independent frontier", () => {
+  const records = [
+    housing("cheap-kichijoji", 60_000, 50, {
+      pareto_location_scores: { balanced: 50, kichijoji: 20, shibuya: 80 },
+    }),
+    housing("close-shibuya", 70_000, 40, {
+      pareto_location_scores: { balanced: 40, kichijoji: 40, shibuya: 20 },
+    }),
+  ];
+
+  assert.equal(housingParetoLocation(records[0], "kichijoji"), 20);
+  assert.deepEqual([...housingParetoFrontierIds(records, "kichijoji")], [
+    "cheap-kichijoji",
+  ]);
+  assert.deepEqual(
+    [...housingParetoFrontierIds(records, "shibuya")].sort(),
+    ["cheap-kichijoji", "close-shibuya"],
+  );
+  assert.deepEqual(
+    housingParetoPoints(records, null, "shibuya")
+      .filter((point) => point.frontier)
+      .map((point) => point.stableKey)
+      .sort(),
+    ["cheap-kichijoji", "close-shibuya"],
+  );
 });

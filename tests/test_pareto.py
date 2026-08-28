@@ -78,3 +78,53 @@ def test_missing_or_invalid_metrics_fail_closed(app_config) -> None:
     assert frontier == set()
     assert candidates == 0
     assert cohorts == {}
+
+
+def test_each_route_anchor_gets_an_independent_frontier(app_config) -> None:
+    anchors = {anchor.anchor_id: anchor for anchor in app_config.routing.anchors}
+    cheap_kichijoji = housing("cheap-kichijoji", 60_000, 50)
+    cheap_kichijoji.update(
+        {
+            "latitude": anchors["kichijoji"].latitude,
+            "longitude": anchors["kichijoji"].longitude,
+            "commute_routes": [
+                {"anchor_id": "kichijoji", "transit_minutes": 8, "bicycle_minutes": 5},
+                {"anchor_id": "shibuya", "transit_minutes": 55, "bicycle_minutes": 50},
+                {"anchor_id": "shinjuku", "transit_minutes": 45, "bicycle_minutes": 42},
+            ],
+        }
+    )
+    close_shibuya = housing("close-shibuya", 70_000, 35)
+    close_shibuya.update(
+        {
+            "latitude": anchors["shibuya"].latitude,
+            "longitude": anchors["shibuya"].longitude,
+            "commute_routes": [
+                {"anchor_id": "kichijoji", "transit_minutes": 50, "bicycle_minutes": 48},
+                {"anchor_id": "shibuya", "transit_minutes": 7, "bicycle_minutes": 4},
+                {"anchor_id": "shinjuku", "transit_minutes": 16, "bicycle_minutes": 15},
+            ],
+        }
+    )
+    records = [cheap_kichijoji, close_shibuya]
+
+    summary = annotate_pareto_frontier(
+        records,
+        app_config.ranking,
+        app_config.routing,
+    )
+
+    assert summary.frontier_counts["kichijoji"] == 1
+    assert summary.frontier_counts["shibuya"] == 2
+    assert cheap_kichijoji["pareto_frontiers"]["kichijoji"] is True
+    assert close_shibuya["pareto_frontiers"]["kichijoji"] is False
+    assert cheap_kichijoji["pareto_frontiers"]["shibuya"] is True
+    assert close_shibuya["pareto_frontiers"]["shibuya"] is True
+    assert (
+        cheap_kichijoji["pareto_location_scores"]["kichijoji"]
+        < close_shibuya["pareto_location_scores"]["kichijoji"]
+    )
+    assert (
+        cheap_kichijoji["pareto_location_score"]
+        == cheap_kichijoji["pareto_location_scores"]["balanced"]
+    )

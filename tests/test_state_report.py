@@ -178,17 +178,37 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     assert "advertised_monthly_from_yen" in csv_text.splitlines()[0]
     assert "priority_score" in csv_text.splitlines()[0]
     assert "pareto_location_score" in csv_text.splitlines()[0]
-    assert latest["schema_version"] == 5
-    assert latest["ranking"]["pareto"]["complexity"] == "O(n log n)"
+    assert "pareto_location_scores" in csv_text.splitlines()[0]
+    assert latest["schema_version"] == 6
+    assert latest["ranking"]["pareto"]["complexity"] == "O(p * n log n), p <= 4"
     assert latest["ranking"]["pareto"]["candidate_count"] == 1
+    assert [perspective["id"] for perspective in latest["ranking"]["pareto"]["perspectives"]] == [
+        "balanced",
+        "kichijoji",
+        "shibuya",
+        "shinjuku",
+    ]
+    assert latest["ranking"]["pareto"]["frontier_counts"] == {
+        "balanced": 1,
+        "kichijoji": 1,
+        "shibuya": 1,
+        "shinjuku": 1,
+    }
     assert latest["housing"][0]["pareto_candidate"] is True
     assert latest["housing"][0]["pareto_frontier"] is True
     assert isinstance(latest["housing"][0]["pareto_location_score"], float)
+    assert set(latest["housing"][0]["pareto_location_scores"]) == {
+        "balanced",
+        "kichijoji",
+        "shibuya",
+        "shinjuku",
+    }
     assert csv_text.splitlines()[1].startswith("eligible")
     assert "'=formula-like title" in csv_text
     markdown = published.markdown_path.read_text(encoding="utf-8")
     assert "ranking mean 90.0 min including missing-route penalties" in markdown
     assert "Pareto frontier: 1 of 1" in markdown
+    assert "Anchor-specific Pareto frontiers: Kichijoji Station 1/1" in markdown
     manifest = json.loads((published.directory / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"housing.json", "housing.md", "housing.csv"}
     with pytest.raises(RuntimeError, match="already exists"):

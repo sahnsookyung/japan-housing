@@ -24,10 +24,12 @@ For complete cost evidence, ranking price spreads initial and exit costs over th
 landing track and twelve months for the long-term track. Incomplete totals remain in a lower
 evidence tier and use only the verified recurring amount; unknown charges are never imputed. The
 dashboard also offers closer (40/60 price/location), balanced (60/40), cheaper (80/20), and
-Pareto-frontier views. The frontier minimizes effective monthly price against one normalized
-location-burden axis built from the configured straight-line, transit/bus, and bicycle components.
-Only eligible, still-actionable homes compete, and landing and long-term tracks remain separate so
-one contract type cannot hide useful choices in another.
+Pareto-frontier views. The default frontier minimizes effective monthly price against a balanced
+location-burden axis built from midpoint distance plus mean transit/bus and bicycle time across all
+three commute anchors. The dashboard can switch to an independent Kichijoji, Shibuya, or Shinjuku
+frontier; each anchor view uses distance and route times to that station only. Only eligible,
+still-actionable homes compete, and landing and long-term tracks remain separate so one contract
+type cannot hide useful choices in another.
 
 Distance is calculated from provider-published coordinates to the arithmetic geographic centroid
 of Kichijoji, Shibuya, and Shinjuku stations (`35.6840741, 139.6604630`). Actual public-transit
@@ -65,7 +67,8 @@ uv run japan-housing dashboard
 
 The `japan-housing` dashboard binds only to <http://127.0.0.1:8766>. Its decision-desk interface
 filters the latest report, compares up to three listings, charts effective monthly price against
-normalized location burden, and recomputes the Pareto frontier after every filter. It persists
+normalized location burden, switches among balanced and per-station Pareto frontiers, and
+recomputes the selected frontier after every filter. It persists
 `shortlisted`, `contacted`, `application_started`, `reserved`, and `not_interested` decisions in
 local SQLite state. Missing route evidence remains visible and retains the configured ranking
 penalties; the UI never presents a penalized route as observed.

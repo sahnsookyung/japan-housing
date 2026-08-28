@@ -47,7 +47,7 @@ def build_report_payload(
     for item in records:
         item["source_status"] = statuses.get(str(item.get("source_id")), "unknown")
     records.sort(key=lambda item: tuple(item.get("rank_key") or (999, str(item.get("stable_key")))))
-    pareto = annotate_pareto_frontier(records, config.ranking)
+    pareto = annotate_pareto_frontier(records, config.ranking, config.routing)
     counts = {name: 0 for name in ("eligible", "review", "excluded")}
     tracks = {name: 0 for name in ("landing", "long_term", "both")}
     for item in records:
@@ -68,7 +68,7 @@ def build_report_payload(
         else "partial"
     )
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "run_id": run_id,
         "generated_at": iso_now(),
         "status": status,
@@ -116,11 +116,32 @@ def build_report_payload(
             "pareto": {
                 "direction": "minimize_effective_monthly_price_and_location_burden",
                 "price_metric": "ranking_price_yen",
-                "location_metric": "pareto_location_score",
+                "location_metric": "pareto_location_scores[selected_perspective]",
                 "location_inputs": [
                     "midpoint_distance",
                     "mean_public_transit_across_anchors",
                     "mean_bicycle_time_across_anchors",
+                ],
+                "perspectives": [
+                    {
+                        "id": "balanced",
+                        "label": "All anchors (balanced)",
+                        "kind": "aggregate",
+                        "distance_target": config.ranking.anchor_label,
+                        "candidate_count": pareto.candidate_counts["balanced"],
+                        "frontier_count": pareto.frontier_counts["balanced"],
+                    },
+                    *(
+                        {
+                            "id": anchor.anchor_id,
+                            "label": anchor.label,
+                            "kind": "anchor",
+                            "distance_target": anchor.label,
+                            "candidate_count": pareto.candidate_counts[anchor.anchor_id],
+                            "frontier_count": pareto.frontier_counts[anchor.anchor_id],
+                        }
+                        for anchor in config.routing.anchors
+                    ),
                 ],
                 "cohort": "housing_track",
                 "candidate_classification": "eligible",
@@ -128,7 +149,10 @@ def build_report_payload(
                 "candidate_count": pareto.candidate_count,
                 "frontier_count": pareto.frontier_count,
                 "cohort_counts": pareto.cohort_counts,
-                "complexity": "O(n log n)",
+                "candidate_counts": pareto.candidate_counts,
+                "frontier_counts": pareto.frontier_counts,
+                "perspective_cohort_counts": pareto.perspective_cohort_counts,
+                "complexity": "O(p * n log n), p <= 4",
             },
             "reclassified_records": reclassified,
             "long_term_comparison_months": config.profile.long_term_comparison_months,
@@ -172,6 +196,11 @@ def build_report_payload(
 def _markdown(payload: dict[str, Any]) -> str:
     counts = payload["classification_counts"]
     ranking = payload["ranking"]
+    anchor_frontiers = " · ".join(
+        f"{perspective['label']} {perspective['frontier_count']}/{perspective['candidate_count']}"
+        for perspective in ranking["pareto"]["perspectives"]
+        if perspective["kind"] == "anchor"
+    )
     lines = [
         "# Japan Housing Report",
         "",
@@ -222,6 +251,10 @@ def _markdown(payload: dict[str, Any]) -> str:
             f"{ranking['pareto']['candidate_count']} eligible, still-actionable candidates. "
             "Effective monthly price and normalized location burden are both minimized within "
             "each housing track."
+        ),
+        (
+            f"> Anchor-specific Pareto frontiers: {anchor_frontiers}. Each station view uses "
+            "its own straight-line distance, public-transit/bus time, and bicycle time."
         ),
         "",
     ]
@@ -332,6 +365,8 @@ def _markdown(payload: dict[str, Any]) -> str:
 
 
 def _safe_csv(value: object) -> object:
+    if isinstance(value, dict | list | tuple):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if isinstance(value, str) and value[:1] in {"=", "+", "-", "@"}:
         return "'" + value
     return value
@@ -357,6 +392,10 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "pareto_candidate",
         "pareto_frontier",
         "pareto_location_score",
+        "pareto_candidates",
+        "pareto_frontiers",
+        "pareto_location_scores",
+        "pareto_distances_km",
         "distance_to_anchor_km",
         "transit_minutes_mean",
         "bicycle_minutes_mean",

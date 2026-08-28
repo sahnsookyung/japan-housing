@@ -121,7 +121,7 @@
           </label>
         </div>
         <p id="pareto-explainer" class="pareto-explainer">
-          Efficient choices minimize effective monthly price and normalized location burden. The location axis combines midpoint distance, transit/bus time, and bicycle time; missing routes retain their configured penalties.
+          Efficient choices minimize effective monthly price and normalized location burden. Use the Pareto panel to compare the balanced three-anchor view or an individual Kichijoji, Shibuya, or Shinjuku commute; missing routes retain their configured penalties.
         </p>
       </section>
 
@@ -160,10 +160,17 @@
         <section class="pareto-panel" aria-labelledby="pareto-heading">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">PRICE ↓ · LOCATION BURDEN ↓</p>
+              <p id="pareto-axis-context" class="eyebrow">PRICE ↓ · ALL ANCHORS (BALANCED) BURDEN ↓</p>
               <h2 id="pareto-heading">Pareto frontier</h2>
             </div>
-            <span id="pareto-total" class="frontier-pill">0 efficient</span>
+            <div class="pareto-heading-actions">
+              <label class="compact-field" for="pareto-perspective">Commute perspective
+                <select id="pareto-perspective">
+                  <option value="balanced">All anchors (balanced)</option>
+                </select>
+              </label>
+              <span id="pareto-total" class="frontier-pill">0 efficient</span>
+            </div>
           </div>
           <div id="pareto-chart" class="pareto-chart" role="group" aria-label="Interactive chart of effective monthly price and location burden"></div>
           <article id="chart-detail" class="chart-detail" aria-live="polite">

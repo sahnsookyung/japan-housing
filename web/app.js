@@ -2,6 +2,7 @@
 
 import {
   housingParetoFrontierIds,
+  housingParetoLocation,
   housingParetoPoints,
 } from "/housing-pareto.mjs";
 
@@ -13,6 +14,7 @@ const controls = {
   decision: document.querySelector("#decision"),
   maxCost: document.querySelector("#max-cost"),
   rankingView: document.querySelector("#ranking-view"),
+  paretoPerspective: document.querySelector("#pareto-perspective"),
 };
 const state = {
   report: null,
@@ -90,7 +92,57 @@ function anchorLabel() {
   return state.report?.ranking?.anchor_label || "configured midpoint";
 }
 
+function paretoPerspectiveId() {
+  return controls.paretoPerspective?.value || "balanced";
+}
+
+function paretoPerspective() {
+  const perspectiveId = paretoPerspectiveId();
+  return (state.report?.ranking?.pareto?.perspectives || []).find(
+    (perspective) => perspective.id === perspectiveId,
+  ) || {
+    id: "balanced",
+    label: "All anchors (balanced)",
+    kind: "aggregate",
+    distance_target: anchorLabel(),
+  };
+}
+
+function perspectiveLocation(item) {
+  return housingParetoLocation(item, paretoPerspectiveId());
+}
+
+function perspectiveDistance(item) {
+  const perspectiveId = paretoPerspectiveId();
+  const distance = item?.pareto_distances_km?.[perspectiveId];
+  if (Number.isFinite(distance)) return distance;
+  return perspectiveId === "balanced" ? item?.distance_to_anchor_km : Number.NaN;
+}
+
+function perspectiveRoute(item) {
+  if (paretoPerspectiveId() === "balanced") return null;
+  return (item.commute_routes || []).find(
+    (route) => route.anchor_id === paretoPerspectiveId(),
+  ) || null;
+}
+
 function commuteText(item, mode) {
+  const perspective = paretoPerspective();
+  if (perspective.kind === "anchor") {
+    const route = perspectiveRoute(item);
+    const observed = route?.[`${mode}_minutes`];
+    const penalty = state.report?.ranking?.[
+      mode === "transit"
+        ? "missing_transit_penalty_minutes"
+        : "missing_bicycle_penalty_minutes"
+    ];
+    const label = mode === "transit" ? "Transit / bus" : "Bicycle";
+    if (Number.isFinite(observed)) {
+      return `${label}: ${observed.toFixed(1)} min to ${perspective.label}`;
+    }
+    const penaltyText = Number.isFinite(penalty) ? `${penalty.toFixed(1)} min penalty` : "penalty";
+    return `${label}: pending to ${perspective.label}; ${penaltyText} ranked`;
+  }
   const observed = item[`${mode}_minutes_mean`];
   const scored = item[`${mode}_minutes_scored`];
   const coverage = Number(item[`${mode}_route_coverage`] || 0);
@@ -105,9 +157,11 @@ function commuteText(item, mode) {
 
 function compareRank(left, right) {
   if (controls.rankingView.value === "pareto") {
+    const leftLocation = perspectiveLocation(left);
+    const rightLocation = perspectiveLocation(right);
     return (
-      (left.pareto_location_score ?? Number.POSITIVE_INFINITY) -
-        (right.pareto_location_score ?? Number.POSITIVE_INFINITY) ||
+      (Number.isFinite(leftLocation) ? leftLocation : Number.POSITIVE_INFINITY) -
+        (Number.isFinite(rightLocation) ? rightLocation : Number.POSITIVE_INFINITY) ||
       (left.ranking_price_yen ?? Number.POSITIVE_INFINITY) -
         (right.ranking_price_yen ?? Number.POSITIVE_INFINITY) ||
       String(left.stable_key).localeCompare(String(right.stable_key))
@@ -215,14 +269,17 @@ function renderRows(records, frontierIds) {
     row.append(monthly);
 
     const location = node("td", { className: "location-cell" });
+    const locationScore = perspectiveLocation(item);
+    const distance = perspectiveDistance(item);
+    const perspective = paretoPerspective();
     location.append(node("strong", {
-      text: Number.isFinite(item.pareto_location_score)
-        ? `${item.pareto_location_score.toFixed(2)} burden`
+      text: Number.isFinite(locationScore)
+        ? `${locationScore.toFixed(2)} burden`
         : "Location unavailable",
     }));
     location.append(node("small", {
-      text: Number.isFinite(item.distance_to_anchor_km)
-        ? `${item.distance_to_anchor_km.toFixed(2)} km to midpoint`
+      text: Number.isFinite(distance)
+        ? `${distance.toFixed(2)} km to ${perspective.distance_target}`
         : "Distance penalty applied",
     }));
     location.append(node("small", { text: commuteText(item, "transit") }));
@@ -255,6 +312,9 @@ function renderCompare() {
   section.hidden = selected.length === 0;
   container.replaceChildren();
   for (const item of selected) {
+    const locationScore = perspectiveLocation(item);
+    const distance = perspectiveDistance(item);
+    const perspective = paretoPerspective();
     const card = node("article", { className: "compare-card" });
     card.append(safeLink(item.url, item.title));
     card.append(node("strong", { text: `${yen(item.ranking_price_yen)} effective / month` }));
@@ -262,7 +322,7 @@ function renderCompare() {
     card.append(node("span", { text: commuteText(item, "transit") }));
     card.append(node("span", { text: commuteText(item, "bicycle") }));
     card.append(node("span", {
-      text: `${Number.isFinite(item.distance_to_anchor_km) ? `${item.distance_to_anchor_km.toFixed(2)} km` : "distance penalty"} · location burden ${Number.isFinite(item.pareto_location_score) ? item.pareto_location_score.toFixed(2) : "unknown"}`,
+      text: `${Number.isFinite(distance) ? `${distance.toFixed(2)} km to ${perspective.distance_target}` : "distance penalty"} · location burden ${Number.isFinite(locationScore) ? locationScore.toFixed(2) : "unknown"}`,
     }));
     card.append(node("span", { text: `Available: ${item.available_text || "confirm"}` }));
     card.append(node("span", { text: `Registration: ${item.registration_confidence || "unknown"}` }));
@@ -277,10 +337,15 @@ function chartDetail(item, frontier) {
     container.textContent = "Select a chart point to inspect its housing trade-off.";
     return;
   }
+  const locationScore = perspectiveLocation(item);
   container.append(node("span", { className: frontier ? "badge badge-frontier" : "badge", text: frontier ? "Pareto frontier" : "Comparable" }));
   container.append(safeLink(item.url, item.title || "Untitled housing"));
-  container.append(node("strong", { text: `${yen(item.ranking_price_yen)} effective · ${item.pareto_location_score.toFixed(2)} location burden` }));
-  container.append(node("small", { text: `${item.track} · ${item.city || item.prefecture || "location unverified"}` }));
+  container.append(node("strong", {
+    text: `${yen(item.ranking_price_yen)} effective · ${Number.isFinite(locationScore) ? locationScore.toFixed(2) : "unknown"} location burden`,
+  }));
+  container.append(node("small", {
+    text: `${paretoPerspective().label} · ${item.track} · ${item.city || item.prefecture || "location unverified"}`,
+  }));
 }
 
 function scale(value, minimum, maximum, start, end) {
@@ -290,7 +355,8 @@ function scale(value, minimum, maximum, start, end) {
 
 function renderPareto(records, frontierIds) {
   const container = document.querySelector("#pareto-chart");
-  const points = housingParetoPoints(records, frontierIds);
+  const perspective = paretoPerspective();
+  const points = housingParetoPoints(records, frontierIds, perspective.id);
   container.replaceChildren();
   document.querySelector("#pareto-total").textContent = `${frontierIds.size} efficient`;
   const focused = points.find((point) => point.stableKey === state.focusedKey);
@@ -321,7 +387,7 @@ function renderPareto(records, frontierIds) {
   const svg = svgNode("svg", {
     viewBox: `0 0 ${width} ${height}`,
     role: "img",
-    "aria-label": `${points.length} comparable homes; ${frontierIds.size} are on the Pareto frontier`,
+    "aria-label": `${perspective.label}: ${points.length} comparable homes; ${frontierIds.size} are on the Pareto frontier`,
   });
   for (let index = 0; index <= 4; index += 1) {
     const ratio = index / 4;
@@ -332,7 +398,7 @@ function renderPareto(records, frontierIds) {
     svg.append(svgNode("text", { x: xPosition, y: height - 31, class: "chart-tick", "text-anchor": "middle" }, (locationMin + ratio * (locationMax - locationMin)).toFixed(0)));
     svg.append(svgNode("text", { x: padding.left - 10, y: yPosition + 4, class: "chart-tick", "text-anchor": "end" }, yen(priceMax - ratio * (priceMax - priceMin))));
   }
-  svg.append(svgNode("text", { x: (padding.left + width - padding.right) / 2, y: height - 8, class: "chart-axis", "text-anchor": "middle" }, "Normalized location burden (lower is better)"));
+  svg.append(svgNode("text", { x: (padding.left + width - padding.right) / 2, y: height - 8, class: "chart-axis", "text-anchor": "middle" }, `${perspective.label} location burden (lower is better)`));
   const yLabel = svgNode("text", { x: 18, y: height / 2, class: "chart-axis", "text-anchor": "middle", transform: `rotate(-90 18 ${height / 2})` }, "Effective monthly price (lower is better)");
   svg.append(yLabel);
 
@@ -361,9 +427,9 @@ function renderPareto(records, frontierIds) {
       role: "button",
       "data-stable-key": point.stableKey,
       "data-frontier": String(point.frontier),
-      "aria-label": `${point.item.title}; ${yen(point.price)} effective monthly; ${point.location.toFixed(2)} location burden; ${point.frontier ? "Pareto frontier" : "comparable"}`,
+      "aria-label": `${point.item.title}; ${yen(point.price)} effective monthly; ${point.location.toFixed(2)} ${perspective.label} location burden; ${point.frontier ? "Pareto frontier" : "comparable"}`,
     });
-    circle.append(svgNode("title", {}, `${point.item.title} · ${yen(point.price)} · burden ${point.location.toFixed(2)}`));
+    circle.append(svgNode("title", {}, `${point.item.title} · ${yen(point.price)} · ${perspective.label} burden ${point.location.toFixed(2)}`));
     const selectPoint = () => {
       state.focusedKey = point.stableKey;
       renderPareto(records, frontierIds);
@@ -411,7 +477,9 @@ function renderSummary() {
   const coverage = Math.round((state.report?.commute_coverage?.coverage_ratio || 0) * 100);
   document.querySelector("#summary-eligible").textContent = counts.eligible || 0;
   document.querySelector("#summary-review").textContent = counts.review || 0;
-  document.querySelector("#summary-pareto").textContent = state.report?.ranking?.pareto?.frontier_count || 0;
+  const pareto = state.report?.ranking?.pareto || {};
+  document.querySelector("#summary-pareto").textContent =
+    pareto.frontier_counts?.[paretoPerspectiveId()] ?? pareto.frontier_count ?? 0;
   document.querySelector("#summary-coverage").textContent = `${coverage}%`;
   document.querySelector("#anchor-label").textContent = anchorLabel();
   document.querySelector("#summary").textContent =
@@ -430,7 +498,8 @@ function render() {
   if (!state.report) return;
   showError("");
   const baseRecords = (state.report.housing || []).filter(matchesBase);
-  const frontierIds = housingParetoFrontierIds(baseRecords);
+  const perspective = paretoPerspective();
+  const frontierIds = housingParetoFrontierIds(baseRecords, perspective.id);
   const records = (controls.rankingView.value === "pareto"
     ? baseRecords.filter((item) => frontierIds.has(item.stable_key))
     : baseRecords
@@ -438,11 +507,15 @@ function render() {
 
   document.querySelector("#result-count").textContent = records.length;
   document.querySelector("#frontier-feedback").textContent =
-    `${records.length} shown · ${frontierIds.size} efficient among ${baseRecords.length} filtered`;
+    `${records.length} shown · ${frontierIds.size} ${perspective.label} efficient among ${baseRecords.length} filtered`;
+  document.querySelector("#pareto-heading").textContent = `${perspective.label} frontier`;
+  document.querySelector("#pareto-axis-context").textContent =
+    `PRICE ↓ · ${perspective.label.toUpperCase()} BURDEN ↓`;
   const routeCoverage = Math.round((state.report.commute_coverage?.coverage_ratio || 0) * 100);
+  const distanceTarget = perspective.distance_target || perspective.label;
   document.querySelector("#pareto-caption").textContent = routeCoverage === 100
-    ? "Location burden uses complete transit/bus, bicycle, and midpoint-distance evidence. Frontiers are recomputed after every filter."
-    : `Route coverage is ${routeCoverage}%; missing route elements retain configured penalties. Frontiers are recomputed after every filter.`;
+    ? `${perspective.label} burden uses complete transit/bus and bicycle evidence plus straight-line distance to ${distanceTarget}. Frontiers are independent by housing track and recomputed after every filter.`
+    : `Overall route coverage is ${routeCoverage}%; missing ${perspective.label} route elements retain configured penalties, with straight-line distance measured to ${distanceTarget}. Frontiers are independent by housing track and recomputed after every filter.`;
 
   renderRows(records, frontierIds);
   renderPareto(baseRecords, frontierIds);
@@ -460,6 +533,23 @@ async function load() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not load the report");
     state.report = payload;
+    const currentPerspective = paretoPerspectiveId();
+    const perspectives = payload.ranking?.pareto?.perspectives || [];
+    controls.paretoPerspective.replaceChildren(
+      ...perspectives.map((perspective) => node("option", {
+        value: perspective.id,
+        text: perspective.label,
+      })),
+    );
+    if (!perspectives.length) {
+      controls.paretoPerspective.append(node("option", {
+        value: "balanced",
+        text: "All anchors (balanced)",
+      }));
+    }
+    controls.paretoPerspective.value = perspectives.some(
+      (perspective) => perspective.id === currentPerspective,
+    ) ? currentPerspective : "balanced";
     for (const [name, weights] of Object.entries(payload.ranking?.variants || {})) {
       const option = controls.rankingView.querySelector(`option[value="${name}"]`);
       if (option) option.textContent = `${name[0].toUpperCase()}${name.slice(1)} · ${Math.round(weights.price_weight * 100)}% price`;
@@ -483,6 +573,7 @@ document.querySelector("#reset").addEventListener("click", () => {
   controls.decision.value = "all";
   controls.maxCost.value = "80000";
   controls.rankingView.value = "balanced";
+  controls.paretoPerspective.value = "balanced";
   render();
 });
 document.querySelector("#clear-compare").addEventListener("click", () => {
