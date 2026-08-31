@@ -51,6 +51,8 @@ class RuntimeConfig:
     alert_limit: int = 20
     partial_retry_minutes: int = 60
     report_retention_days: int = 30
+    report_recent_runs: int = 42
+    report_retention_max_bytes: int = 1024 * 1024 * 1024
     state_retention_days: int = 90
     notification_max_attempts: int = 3
     user_agent: str = DEFAULT_USER_AGENT
@@ -184,6 +186,10 @@ def load_config(path: Path) -> AppConfig:
         alert_limit=int(runtime_data.get("alert_limit", 20)),
         partial_retry_minutes=int(runtime_data.get("partial_retry_minutes", 60)),
         report_retention_days=int(runtime_data.get("report_retention_days", 30)),
+        report_recent_runs=int(runtime_data.get("report_recent_runs", 42)),
+        report_retention_max_bytes=int(
+            runtime_data.get("report_retention_max_bytes", 1024 * 1024 * 1024)
+        ),
         state_retention_days=int(runtime_data.get("state_retention_days", 90)),
         notification_max_attempts=int(runtime_data.get("notification_max_attempts", 3)),
         user_agent=str(runtime_data.get("user_agent", DEFAULT_USER_AGENT)),
@@ -206,6 +212,8 @@ def load_config(path: Path) -> AppConfig:
         "alert_limit",
         "partial_retry_minutes",
         "report_retention_days",
+        "report_recent_runs",
+        "report_retention_max_bytes",
         "state_retention_days",
         "notification_max_attempts",
     ):

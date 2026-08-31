@@ -136,6 +136,8 @@ def _candidate(
 ) -> tuple[str, float, float, str] | None:
     if record.get("classification") != "eligible":
         return None
+    if str(record.get("freshness") or "current") != "current":
+        return None
     if str(record.get("decision_status") or "new") in NON_ACTIONABLE_DECISIONS:
         return None
     stable_key = str(record.get("stable_key") or "")
@@ -145,6 +147,16 @@ def _candidate(
         return None
     track = str(record.get("track") or "both")
     return track, price, location, stable_key
+
+
+def is_pareto_candidate(
+    record: dict[str, Any],
+    ranking: RankingConfig,
+    perspective_id: str = BALANCED_PERSPECTIVE_ID,
+) -> bool:
+    """Return whether a record is actionable and comparable in one perspective."""
+
+    return _candidate(record, ranking, perspective_id) is not None
 
 
 def pareto_frontier_keys(

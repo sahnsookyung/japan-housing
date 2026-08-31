@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from .config import AppConfig
-from .http import BoundedHttpClient, BudgetExhausted, HttpFailure
+from .http import BoundedHttpClient, BudgetExhausted, CircuitOpen, HttpFailure
 from .models import (
     HOUSING_RECORD_SCHEMA_VERSION,
     Classification,
@@ -71,9 +71,11 @@ def _bounded_map(
     *,
     workers: int,
     max_queued: int,
+    stop_on: tuple[type[BaseException], ...] = (),
 ) -> Iterator[tuple[T, R | Exception]]:
     iterator = iter(values)
     pending: dict[Future[R], T] = {}
+    stop_scheduling = False
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="housing-detail") as executor:
         while len(pending) < max_queued:
             try:
@@ -83,17 +85,25 @@ def _bounded_map(
             pending[executor.submit(function, value)] = value
         while pending:
             done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            completed: list[tuple[T, R | Exception]] = []
             for future in done:
                 value = pending.pop(future)
                 try:
                     result: R | Exception = future.result()
                 except Exception as exc:
                     result = exc
+                completed.append((value, result))
+            if stop_on and any(isinstance(result, stop_on) for _value, result in completed):
+                stop_scheduling = True
+            for value, result in completed:
                 yield value, result
+            if stop_scheduling:
+                continue
+            for _value, _result in completed:
                 try:
                     next_value = next(iterator)
                 except StopIteration:
-                    continue
+                    break
                 pending[executor.submit(function, next_value)] = next_value
 
 
@@ -143,7 +153,6 @@ def _stage_records(
             and record.coordinate_basis == "unknown"
         ):
             record.coordinate_basis = "provider_list_geo"
-        record.schema_version = HOUSING_RECORD_SCHEMA_VERSION
         commute = store.commute_summary(record, config.routing, config.ranking)
         result = classify(
             record,
@@ -195,6 +204,8 @@ def _run_source(
     config: AppConfig,
     run_id: str,
     client: BoundedHttpClient,
+    *,
+    enqueue_changes: bool = False,
 ) -> SourceRunResult:
     spec = adapter.spec
     started = time.perf_counter()
@@ -207,21 +218,42 @@ def _run_source(
         batch = adapter.discover(
             store.discovery_cursor(spec.source_id), config.runtime.list_page_budget_per_source
         )
-        refs = list(store.accumulate_discovery(spec.source_id, batch.refs, batch.next_cursor))
+        discovered_refs = list(
+            store.accumulate_discovery(spec.source_id, batch.refs, batch.next_cursor)
+        )
         metrics.list_pages = batch.list_pages
-        metrics.discovered = len(refs)
-        if not refs:
+        metrics.discovered = len(discovered_refs)
+        if not discovered_refs:
             raise ValueError("configured public entry pages produced no listing IDs")
+        current_ref_ids = {ref.external_id for ref in discovered_refs}
+        sweep_refs = list(
+            store.stale_revalidation_refs(
+                spec.source_id,
+                exclude_page_ids=current_ref_ids,
+                limit=spec.stale_revalidation_budget,
+            )
+        )
+        sweep_ref_ids = {ref.external_id for ref in sweep_refs}
+        metrics.stale_revalidation_candidates = len(sweep_refs)
+        refs = discovered_refs + sweep_refs
 
         cache_by_id = {ref.external_id: store.lookup_cache(ref) for ref in refs}
         reusable_by_id = {
-            ref.external_id: _cache_reusable(ref, cache_by_id[ref.external_id], config)
+            ref.external_id: ref.external_id not in sweep_ref_ids
+            and _cache_reusable(ref, cache_by_id[ref.external_id], config)
             for ref in refs
         }
         invalid_refs = [ref for ref in refs if not reusable_by_id[ref.external_id]]
         retryable_refs = [ref for ref in invalid_refs if store.detail_attempt_due(ref)]
         metrics.detail_deferred = len(invalid_refs) - len(retryable_refs)
-        network_refs = store.order_detail_refs(retryable_refs, cache_by_id)
+        stale_retryable = [ref for ref in retryable_refs if ref.external_id in sweep_ref_ids]
+        current_retryable = [ref for ref in retryable_refs if ref.external_id not in sweep_ref_ids]
+        # Reserve the small configured sweep at the front. Otherwise a large current discovery
+        # backlog can permanently starve non-authoritative records that need closure checks.
+        network_refs = [
+            *store.order_detail_refs(stale_retryable, cache_by_id),
+            *store.order_detail_refs(current_retryable, cache_by_id),
+        ]
         metrics.detail_candidates = len(network_refs)
         source_detail_budget = min(
             config.runtime.detail_budget_per_source,
@@ -230,12 +262,14 @@ def _run_source(
         capped_refs = network_refs[:source_detail_budget]
         detail_budget_exhausted = len(network_refs) > len(capped_refs)
 
+        current_cache_hits = 0
         for ref in refs:
             cache = cache_by_id[ref.external_id]
             if reusable_by_id[ref.external_id]:
                 assert cache is not None
                 staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 metrics.detail_cache_hits += 1
+                current_cache_hits += int(ref.external_id in current_ref_ids)
 
         def fetch(ref: ListingRef) -> DetailResult:
             cache = cache_by_id[ref.external_id]
@@ -275,24 +309,37 @@ def _run_source(
 
         processed: set[str] = set()
         verified_pages: set[str] = set()
+        closed_pages: set[str] = set()
         for ref, result in _bounded_map(
             fetch,
             capped_refs,
             workers=config.runtime.per_host_workers,
-            max_queued=max(config.runtime.per_host_workers, config.runtime.per_host_workers * 2),
+            max_queued=min(
+                config.runtime.max_queued_tasks,
+                max(config.runtime.per_host_workers, config.runtime.per_host_workers * 2),
+            ),
+            stop_on=(CircuitOpen, BudgetExhausted),
         ):
             processed.add(ref.external_id)
             metrics.detail_network += 1
             cache = cache_by_id[ref.external_id]
             if isinstance(result, Exception):
-                metrics.parse_failures += 1
-                store.record_detail_attempt(ref, "failure")
+                if isinstance(result, (CircuitOpen, BudgetExhausted)):
+                    metrics.detail_deferred += 1
+                elif isinstance(result, HttpFailure):
+                    metrics.detail_fetch_failures += 1
+                    store.record_detail_attempt(ref, "failure")
+                else:
+                    metrics.parse_failures += 1
+                    store.record_detail_attempt(ref, "parse_failure")
                 if cache:
                     staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
             if result.status == "missing" or result.verified_empty:
                 verified_pages.add(ref.external_id)
+                closed_pages.add(ref.external_id)
                 metrics.explicit_closed += 1
+                metrics.stale_revalidated += int(ref.external_id in sweep_ref_ids)
                 store.record_detail_attempt(ref, "missing")
                 store.cache_page(
                     ref,
@@ -316,6 +363,7 @@ def _run_source(
                 continue
             classifications: list[Classification] = []
             verified_pages.add(ref.external_id)
+            metrics.stale_revalidated += int(ref.external_id in sweep_ref_ids)
             staged: list[tuple[str, HousingRecord, Classification]] = []
             for record in result.records:
                 commute = store.commute_summary(record, config.routing, config.ranking)
@@ -349,17 +397,27 @@ def _run_source(
             cache = cache_by_id[ref.external_id]
             if cache:
                 staged_count += _stage_records(store, run_id, ref, cache.records, config)
+        metrics.detail_deferred += sum(ref.external_id not in processed for ref in capped_refs)
         store.checkpoint()
 
         status = "healthy"
         error = ""
-        if not batch.complete or detail_budget_exhausted or metrics.detail_deferred:
+        if (
+            not batch.complete
+            or detail_budget_exhausted
+            or metrics.detail_deferred
+            or metrics.detail_fetch_failures
+        ):
             status = "partial"
             reasons = []
             if not batch.complete or detail_budget_exhausted:
                 reasons.append("source budget exhausted")
             if metrics.detail_deferred:
-                reasons.append(f"{metrics.detail_deferred} detail retries are in backoff")
+                reasons.append(
+                    f"{metrics.detail_deferred} details deferred by backoff, budget, or circuit"
+                )
+            if metrics.detail_fetch_failures:
+                reasons.append(f"{metrics.detail_fetch_failures} detail fetches failed")
             error = "; ".join(reasons) + "; cached progress will resume automatically"
         if spec.authoritative_disappearance and metrics.parse_failures and status == "healthy":
             status = "partial"
@@ -386,12 +444,15 @@ def _run_source(
                 and batch.complete
                 and not detail_budget_exhausted
                 and metrics.parse_failures == 0
+                and metrics.detail_fetch_failures == 0
             )
             promotion = store.promote(
                 run_id,
                 spec,
                 complete=complete_for_closure,
                 verified_page_ids=verified_pages if complete_for_closure else set(),
+                closed_page_ids=closed_pages,
+                enqueue_changes=enqueue_changes,
             )
             changes.extend(promotion.changes)
         else:
@@ -403,7 +464,11 @@ def _run_source(
             metrics.detail_cache_hits / detail_total if detail_total else 1.0, 4
         )
         metrics.verified_coverage_ratio = round(
-            min(1.0, (metrics.detail_cache_hits + len(verified_pages)) / metrics.discovered),
+            min(
+                1.0,
+                (current_cache_hits + len(verified_pages.intersection(current_ref_ids)))
+                / metrics.discovered,
+            ),
             4,
         )
         store.finish_source_run(run_id, spec.source_id, status, metrics, error)
@@ -412,7 +477,12 @@ def _run_source(
         status = "partial"
         error = str(exc)
         if staged_count:
-            promotion = store.promote(run_id, spec, complete=False)
+            promotion = store.promote(
+                run_id,
+                spec,
+                complete=False,
+                enqueue_changes=enqueue_changes,
+            )
             changes.extend(promotion.changes)
         else:
             store.discard_staged(run_id, spec.source_id)
@@ -451,6 +521,7 @@ def run_refresh(
     selected = tuple(spec for spec in specs if source_ids is None or spec.source_id in source_ids)
     with StateStore(config.runtime.state_path) as store:
         store.ensure_sources(specs)
+        store.apply_listing_freshness(specs)
         due = [
             spec
             for spec in selected
@@ -467,7 +538,14 @@ def run_refresh(
 
         def execute(spec: SourceSpec) -> SourceRunResult:
             with StateStore(config.runtime.state_path) as source_store:
-                return _run_source(adapters[spec.source_id], source_store, config, run_id, client)
+                return _run_source(
+                    adapters[spec.source_id],
+                    source_store,
+                    config,
+                    run_id,
+                    client,
+                    enqueue_changes=notify and not bootstrap,
+                )
 
         source_workers = min(
             len(due),
@@ -535,6 +613,14 @@ def run_refresh(
             "circuit_openings": sum(result.metrics.circuit_openings for result in results),
             "detail_not_modified": sum(result.metrics.detail_not_modified for result in results),
             "detail_deferred": sum(result.metrics.detail_deferred for result in results),
+            "detail_fetch_failures": sum(
+                result.metrics.detail_fetch_failures for result in results
+            ),
+            "parse_failures": sum(result.metrics.parse_failures for result in results),
+            "stale_revalidation_candidates": sum(
+                result.metrics.stale_revalidation_candidates for result in results
+            ),
+            "stale_revalidated": sum(result.metrics.stale_revalidated for result in results),
             "latency_p95_ms_max": max(
                 (result.metrics.latency_p95_ms for result in results), default=0.0
             ),
@@ -563,6 +649,8 @@ def run_refresh(
         config.runtime.artifacts_path,
         days=config.runtime.report_retention_days,
         keep_run_id=report.run_id,
+        recent_runs=config.runtime.report_recent_runs,
+        max_bytes=config.runtime.report_retention_max_bytes,
     )
     delivery_ok = (report_message is None or report_message.status in {"created", "updated"}) and (
         notification is None or (notification.failed == 0 and notification.unknown == 0)
@@ -595,6 +683,8 @@ def publish_offline_report(config: AppConfig) -> PublishedReport:
         config.runtime.artifacts_path,
         days=config.runtime.report_retention_days,
         keep_run_id=report.run_id,
+        recent_runs=config.runtime.report_recent_runs,
+        max_bytes=config.runtime.report_retention_max_bytes,
     )
     return report
 

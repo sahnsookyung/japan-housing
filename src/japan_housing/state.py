@@ -188,6 +188,7 @@ class StateStore:
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
+                freshness TEXT NOT NULL DEFAULT 'current',
                 miss_count INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS records_source_active
@@ -206,10 +207,13 @@ class StateStore:
                 sent_at TEXT,
                 message_id TEXT NOT NULL DEFAULT '',
                 last_error TEXT NOT NULL DEFAULT '',
-                attempt_count INTEGER NOT NULL DEFAULT 1,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
                 PRIMARY KEY (stable_key, record_fingerprint)
             );
+            CREATE INDEX IF NOT EXISTS notifications_delivery
+                ON notifications(status, next_attempt_at, reserved_at);
             CREATE TABLE IF NOT EXISTS discord_report_message (
                 slot INTEGER PRIMARY KEY CHECK (slot = 1),
                 webhook_id TEXT NOT NULL,
@@ -244,7 +248,21 @@ class StateStore:
         self._ensure_column("detail_cache", "last_modified", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("notifications", "attempt_count", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("notifications", "next_attempt_at", "TEXT")
+        self._ensure_column("notifications", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("commute_routes", "schedule_key", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("records", "freshness", "TEXT NOT NULL DEFAULT 'current'")
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS records_freshness_revalidation "
+            "ON records(source_id, active, freshness, last_seen_at, classification)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS notifications_delivery "
+            "ON notifications(status, next_attempt_at, reserved_at)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS source_runs_health_history "
+            "ON source_runs(source_id, status, finished_at DESC)"
+        )
         self.connection.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -275,6 +293,89 @@ class StateStore:
                         int(spec.authoritative_disappearance),
                     ),
                 )
+
+    def apply_listing_freshness(self, specs: tuple[SourceSpec, ...]) -> dict[str, int]:
+        """Mark non-authoritative inventory stale without treating absence as closure."""
+
+        now = datetime.now().astimezone()
+        changed: dict[str, int] = {}
+        with self.connection:
+            for spec in specs:
+                if spec.authoritative_disappearance or spec.stale_after_hours is None:
+                    cursor = self.connection.execute(
+                        """
+                        UPDATE records SET freshness='current'
+                        WHERE source_id=? AND active=1 AND freshness!='current'
+                        """,
+                        (spec.source_id,),
+                    )
+                else:
+                    cutoff = (now - timedelta(hours=spec.stale_after_hours)).isoformat()
+                    cursor = self.connection.execute(
+                        """
+                        UPDATE records SET freshness='stale'
+                        WHERE source_id=? AND active=1 AND freshness='current'
+                          AND last_seen_at < ?
+                        """,
+                        (spec.source_id, cutoff),
+                    )
+                changed[spec.source_id] = max(0, int(cursor.rowcount))
+            self.connection.execute(
+                "UPDATE records SET freshness='closed' WHERE active=0 AND freshness!='closed'"
+            )
+        return changed
+
+    def stale_revalidation_refs(
+        self,
+        source_id: str,
+        *,
+        exclude_page_ids: set[str],
+        limit: int,
+    ) -> tuple[ListingRef, ...]:
+        """Return an oldest-first, actionable-first bounded stale-page sweep."""
+
+        if limit <= 0:
+            return ()
+        rows = self.connection.execute(
+            """
+            SELECT r.page_external_id, r.record_json, r.last_seen_at,
+                   c.list_fingerprint, c.last_modified
+            FROM records r
+            LEFT JOIN detail_cache c
+              ON c.source_id=r.source_id AND c.page_external_id=r.page_external_id
+            WHERE r.source_id=? AND r.active=1 AND r.freshness='stale'
+            ORDER BY CASE r.classification
+                         WHEN 'eligible' THEN 0 WHEN 'review' THEN 1 ELSE 2 END,
+                     r.last_seen_at, r.page_external_id, r.stable_key
+            """,
+            (source_id,),
+        ).fetchall()
+        refs: list[ListingRef] = []
+        seen = set(exclude_page_ids)
+        for row in rows:
+            page_id = str(row["page_external_id"])
+            if page_id in seen:
+                continue
+            seen.add(page_id)
+            payload = json.loads(row["record_json"])
+            url = str(payload.get("url") or "")
+            if not url:
+                continue
+            refs.append(
+                ListingRef(
+                    source_id,
+                    page_id,
+                    url,
+                    str(row["list_fingerprint"] or payload.get("list_fingerprint") or ""),
+                    str(payload.get("title") or ""),
+                    str(row["last_modified"] or "") or None,
+                    payload.get("latitude"),
+                    payload.get("longitude"),
+                )
+            )
+            if len(refs) >= limit:
+                break
+        return tuple(refs)
 
     def source_due(
         self,
@@ -570,6 +671,8 @@ class StateStore:
         *,
         complete: bool = True,
         verified_page_ids: set[str] | None = None,
+        closed_page_ids: set[str] | None = None,
+        enqueue_changes: bool = False,
     ) -> PromotionResult:
         staged = self.connection.execute(
             "SELECT * FROM staged_records WHERE run_id=? AND source_id=?",
@@ -579,6 +682,7 @@ class StateStore:
         changes: list[dict[str, Any]] = []
         staged_keys = {row["stable_key"] for row in staged}
         verified_pages = verified_page_ids or set()
+        closed_pages = closed_page_ids or set()
         closed = 0
         with self.connection:
             for row in staged:
@@ -597,8 +701,8 @@ class StateStore:
                     INSERT INTO records(
                         stable_key, source_id, page_external_id, record_json,
                         classification, classification_json, fingerprint,
-                        first_seen_at, last_seen_at, active, miss_count
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
+                        first_seen_at, last_seen_at, active, freshness, miss_count
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'current', 0)
                     ON CONFLICT(stable_key) DO UPDATE SET
                         page_external_id=excluded.page_external_id,
                         record_json=excluded.record_json,
@@ -607,6 +711,7 @@ class StateStore:
                         fingerprint=excluded.fingerprint,
                         last_seen_at=excluded.last_seen_at,
                         active=1,
+                        freshness='current',
                         miss_count=0
                     """,
                     (
@@ -633,6 +738,18 @@ class StateStore:
                             "record": changed_record,
                         }
                     )
+                    if enqueue_changes and row["classification"] != "excluded":
+                        self._enqueue_notification_change(changes[-1])
+            if closed_pages:
+                placeholders = ",".join("?" for _ in closed_pages)
+                cursor = self.connection.execute(
+                    f"""
+                    UPDATE records SET active=0, freshness='closed', miss_count=2
+                    WHERE source_id=? AND active=1 AND page_external_id IN ({placeholders})
+                    """,
+                    (spec.source_id, *sorted(closed_pages)),
+                )
+                closed += max(0, int(cursor.rowcount))
             if spec.authoritative_disappearance and complete:
                 active_rows = self.connection.execute(
                     """
@@ -649,8 +766,12 @@ class StateStore:
                     active = 0 if misses >= 2 else 1
                     closed += int(not active)
                     self.connection.execute(
-                        "UPDATE records SET miss_count=?, active=? WHERE stable_key=?",
-                        (misses, active, current["stable_key"]),
+                        """
+                        UPDATE records SET miss_count=?, active=?,
+                            freshness=CASE WHEN ?=1 THEN freshness ELSE 'closed' END
+                        WHERE stable_key=?
+                        """,
+                        (misses, active, active, current["stable_key"]),
                     )
             self.connection.execute(
                 "DELETE FROM staged_records WHERE run_id=? AND source_id=?",
@@ -681,6 +802,7 @@ class StateStore:
                     "decision_status": row["decision_status"] or "new",
                     "decision_note": row["decision_note"] or "",
                     "decision_updated_at": row["decision_updated_at"] or "",
+                    "freshness": row["freshness"] or "current",
                 }
             )
             result.append(item)
@@ -688,7 +810,10 @@ class StateStore:
 
     def routing_candidates(self) -> list[HousingRecord]:
         rows = self.connection.execute(
-            "SELECT record_json FROM records WHERE active=1 AND classification!='excluded'"
+            """
+            SELECT record_json FROM records
+            WHERE active=1 AND freshness='current' AND classification!='excluded'
+            """
         ).fetchall()
         return [HousingRecord.from_dict(json.loads(row["record_json"])) for row in rows]
 
@@ -988,11 +1113,27 @@ class StateStore:
             )
             active = self.connection.execute(
                 """
-                SELECT COUNT(*) records, COUNT(DISTINCT page_external_id) pages
+                SELECT COUNT(*) records, COUNT(DISTINCT page_external_id) pages,
+                       SUM(CASE WHEN freshness='current' THEN 1 ELSE 0 END) current_records,
+                       SUM(CASE WHEN freshness='stale' THEN 1 ELSE 0 END) stale_records
                 FROM records WHERE source_id=? AND active=1
                 """,
                 (source_id,),
             ).fetchone()
+            latest_run = self.connection.execute(
+                """
+                SELECT metrics_json FROM source_runs
+                WHERE source_id=? AND finished_at IS NOT NULL
+                ORDER BY finished_at DESC LIMIT 1
+                """,
+                (source_id,),
+            ).fetchone()
+            try:
+                metrics = json.loads(latest_run["metrics_json"]) if latest_run else {}
+            except (TypeError, json.JSONDecodeError):
+                metrics = {}
+            if not isinstance(metrics, dict):
+                metrics = {}
             discovered = int(source.get("last_discovered") or 0)
             last_run_at = str(source.get("last_run_at") or "")
             age_hours = None
@@ -1009,9 +1150,17 @@ class StateStore:
                     "cached_pages": cached_pages,
                     "active_pages": int(active["pages"] or 0),
                     "active_records": int(active["records"] or 0),
-                    "verified_page_ratio": (
-                        round(min(1.0, cached_pages / discovered), 4) if discovered else 0.0
+                    "current_records": int(active["current_records"] or 0),
+                    "stale_records": int(active["stale_records"] or 0),
+                    "verified_page_ratio": float(metrics.get("verified_coverage_ratio") or 0.0),
+                    "detail_fetch_failures": int(metrics.get("detail_fetch_failures") or 0),
+                    "parse_failures": int(metrics.get("parse_failures") or 0),
+                    "detail_deferred": int(metrics.get("detail_deferred") or 0),
+                    "stale_revalidation_candidates": int(
+                        metrics.get("stale_revalidation_candidates") or 0
                     ),
+                    "stale_revalidated": int(metrics.get("stale_revalidated") or 0),
+                    "cache_hit_ratio": float(metrics.get("cache_hit_ratio") or 0.0),
                     "last_run_age_hours": age_hours,
                 }
             )
@@ -1026,7 +1175,15 @@ class StateStore:
             """,
             (source_id, limit),
         ).fetchall()
-        return [int(json.loads(row["metrics_json"]).get("discovered") or 0) for row in rows]
+        counts: list[int] = []
+        for row in rows:
+            try:
+                metrics = json.loads(row["metrics_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(metrics, dict):
+                counts.append(int(metrics.get("discovered") or 0))
+        return counts
 
     def set_decision(self, stable_key: str, status: str, note: str = "") -> None:
         allowed = {
@@ -1056,7 +1213,83 @@ class StateStore:
                 (stable_key, status, note, iso_now()),
             )
 
-    def reserve_notification(
+    def _enqueue_notification_change(self, change: dict[str, Any]) -> bool:
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO notifications(
+                stable_key, record_fingerprint, status, reserved_at,
+                attempt_count, payload_json
+            ) VALUES(?, ?, 'queued', ?, 0, ?)
+            """,
+            (
+                str(change["stable_key"]),
+                str(change["fingerprint"]),
+                iso_now(),
+                json.dumps(change, ensure_ascii=False),
+            ),
+        )
+        return int(cursor.rowcount) == 1
+
+    def enqueue_notification_changes(self, changes: Iterable[dict[str, Any]]) -> int:
+        queued = 0
+        with self.connection:
+            for change in changes:
+                if change.get("classification") == "excluded":
+                    continue
+                queued += int(self._enqueue_notification_change(change))
+        return queued
+
+    def recover_abandoned_notification_reservations(self, *, minutes: int = 30) -> int:
+        """Fail closed after a crash: an in-flight delivery must never be retried."""
+
+        cutoff = (datetime.now().astimezone() - timedelta(minutes=minutes)).isoformat()
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                UPDATE notifications
+                SET status='delivery_unknown', last_error='abandoned reservation'
+                WHERE status='reserved' AND reserved_at < ?
+                """,
+                (cutoff,),
+            )
+        return max(0, int(cursor.rowcount))
+
+    def pending_notifications(self, *, max_attempts: int = 3) -> list[dict[str, Any]]:
+        now = iso_now()
+        rows = self.connection.execute(
+            """
+            SELECT n.stable_key, n.record_fingerprint, n.payload_json,
+                   r.record_json, r.classification, r.classification_json
+            FROM notifications n JOIN records r USING(stable_key)
+            WHERE n.status IN ('queued', 'retryable_failed')
+              AND n.attempt_count < ?
+              AND (n.next_attempt_at IS NULL OR n.next_attempt_at <= ?)
+              AND r.active=1 AND r.freshness='current'
+              AND r.fingerprint=n.record_fingerprint
+            ORDER BY n.reserved_at
+            """,
+            (max_attempts, now),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            if not isinstance(payload, dict) or not payload.get("stable_key"):
+                record = json.loads(row["record_json"])
+                record.update(json.loads(row["classification_json"]))
+                payload = {
+                    "type": "retry",
+                    "stable_key": row["stable_key"],
+                    "fingerprint": row["record_fingerprint"],
+                    "classification": row["classification"],
+                    "record": record,
+                }
+            result.append(payload)
+        return result
+
+    def claim_notification(
         self,
         stable_key: str,
         fingerprint: str,
@@ -1064,41 +1297,47 @@ class StateStore:
         max_attempts: int = 3,
     ) -> bool:
         now = datetime.now().astimezone()
-        try:
-            with self.connection:
-                self.connection.execute(
-                    """
-                    INSERT INTO notifications(stable_key, record_fingerprint, status, reserved_at)
-                    VALUES(?, ?, 'reserved', ?)
-                    """,
-                    (stable_key, fingerprint, now.isoformat()),
-                )
-            return True
-        except sqlite3.IntegrityError:
-            row = self.connection.execute(
+        with self.connection:
+            cursor = self.connection.execute(
                 """
-                SELECT status, attempt_count, next_attempt_at FROM notifications
+                UPDATE notifications
+                SET status='reserved', reserved_at=?, attempt_count=attempt_count+1,
+                    next_attempt_at=NULL
                 WHERE stable_key=? AND record_fingerprint=?
+                  AND status IN ('queued', 'retryable_failed')
+                  AND attempt_count < ?
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                 """,
-                (stable_key, fingerprint),
-            ).fetchone()
-            if (
-                not row
-                or row["status"] != "retryable_failed"
-                or int(row["attempt_count"]) >= max_attempts
-                or (row["next_attempt_at"] and datetime.fromisoformat(row["next_attempt_at"]) > now)
-            ):
-                return False
-            with self.connection:
-                self.connection.execute(
-                    """
-                    UPDATE notifications SET status='reserved', reserved_at=?,
-                        attempt_count=attempt_count+1, next_attempt_at=NULL
-                    WHERE stable_key=? AND record_fingerprint=?
-                    """,
-                    (now.isoformat(), stable_key, fingerprint),
-                )
-            return True
+                (
+                    now.isoformat(),
+                    stable_key,
+                    fingerprint,
+                    max_attempts,
+                    now.isoformat(),
+                ),
+            )
+        return int(cursor.rowcount) == 1
+
+    def reserve_notification(
+        self,
+        stable_key: str,
+        fingerprint: str,
+        *,
+        max_attempts: int = 3,
+    ) -> bool:
+        """Compatibility wrapper for the durable queue claim operation."""
+
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO notifications(
+                    stable_key, record_fingerprint, status, reserved_at,
+                    attempt_count, payload_json
+                ) VALUES(?, ?, 'queued', ?, 0, '{}')
+                """,
+                (stable_key, fingerprint, iso_now()),
+            )
+        return self.claim_notification(stable_key, fingerprint, max_attempts=max_attempts)
 
     def finish_notification(
         self,
@@ -1143,33 +1382,7 @@ class StateStore:
         ]
 
     def retryable_notifications(self, *, max_attempts: int = 3) -> list[dict[str, Any]]:
-        now = iso_now()
-        rows = self.connection.execute(
-            """
-            SELECT n.stable_key, n.record_fingerprint, r.record_json,
-                   r.classification, r.classification_json
-            FROM notifications n JOIN records r USING(stable_key)
-            WHERE n.status='retryable_failed' AND n.attempt_count < ?
-              AND (n.next_attempt_at IS NULL OR n.next_attempt_at <= ?)
-              AND r.active=1 AND r.fingerprint=n.record_fingerprint
-            ORDER BY n.reserved_at
-            """,
-            (max_attempts, now),
-        ).fetchall()
-        result = []
-        for row in rows:
-            record = json.loads(row["record_json"])
-            record.update(json.loads(row["classification_json"]))
-            result.append(
-                {
-                    "type": "retry",
-                    "stable_key": row["stable_key"],
-                    "fingerprint": row["record_fingerprint"],
-                    "classification": row["classification"],
-                    "record": record,
-                }
-            )
-        return result
+        return self.pending_notifications(max_attempts=max_attempts)
 
     def discord_report_message(self) -> dict[str, Any] | None:
         row = self.connection.execute(
@@ -1211,6 +1424,18 @@ class StateStore:
                 """
                 DELETE FROM notifications WHERE reserved_at < ?
                 AND status IN ('sent', 'failed', 'retryable_failed')
+                """,
+                (cutoff,),
+            )
+            self.connection.execute(
+                """
+                DELETE FROM notifications
+                WHERE status='queued' AND reserved_at < ? AND NOT EXISTS (
+                    SELECT 1 FROM records r
+                    WHERE r.stable_key=notifications.stable_key
+                      AND r.active=1 AND r.freshness='current'
+                      AND r.fingerprint=notifications.record_fingerprint
+                )
                 """,
                 (cutoff,),
             )

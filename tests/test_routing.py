@@ -180,7 +180,7 @@ def test_route_matrix_is_batched_cached_and_aggregated(
     assert summary.transit_coverage == 3
     assert summary.bicycle_coverage == 3
     assert coverage["coverage_ratio"] == 1.0
-    assert reclassified == 1
+    assert reclassified == 0
     assert ranked["transit_minutes_mean"] == 21.0
     assert ranked["bicycle_minutes_mean"] == 31.0
     assert ranked["priority_transit_component"] < 10.0
@@ -246,6 +246,45 @@ def test_provider_errors_are_secret_safe(app_config: AppConfig, tmp_path: Path) 
     assert result.status == "failed"
     assert result.error == "Google Routes HTTP 403"
     assert "secret-key" not in result.error
+
+
+def test_route_transport_failure_retries_once(
+    app_config: AppConfig, tmp_path: Path, monkeypatch
+) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("temporary", request=request)
+        payload = __import__("json").loads(request.content)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "originIndex": 0,
+                    "destinationIndex": index,
+                    "condition": "ROUTE_EXISTS",
+                    "duration": "1200s",
+                    "distanceMeters": 8000,
+                }
+                for index in range(len(payload["destinations"]))
+            ],
+        )
+
+    monkeypatch.setattr("japan_housing.routing.time.sleep", lambda _seconds: None)
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        _promote(store, app_config)
+        result = enrich_commutes(
+            store,
+            app_config,
+            "test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert result.status == "complete"
+    assert attempts == 3
 
 
 def test_incomplete_provider_matrix_is_not_cached(app_config: AppConfig, tmp_path: Path) -> None:

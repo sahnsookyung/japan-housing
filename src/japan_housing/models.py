@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 ClassificationName = Literal["eligible", "review", "excluded"]
 SourceStatus = Literal["healthy", "partial", "failed", "drifted"]
-HOUSING_RECORD_SCHEMA_VERSION = 4
+HOUSING_RECORD_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +186,10 @@ class SourceMetrics:
     detail_cache_hits: int = 0
     parsed: int = 0
     parse_failures: int = 0
+    detail_fetch_failures: int = 0
     explicit_closed: int = 0
+    stale_revalidation_candidates: int = 0
+    stale_revalidated: int = 0
     requests: int = 0
     bytes_downloaded: int = 0
     retries: int = 0

@@ -67,6 +67,17 @@ def test_non_actionable_and_unverified_records_are_not_candidates(app_config) ->
     assert [record["pareto_candidate"] for record in records] == [False, False, False, True]
 
 
+def test_stale_records_are_not_pareto_candidates(app_config) -> None:
+    stale = housing("stale", 50_000, 10)
+    stale["freshness"] = "stale"
+    current = housing("current", 70_000, 40)
+
+    frontier, candidates, _ = pareto_frontier_keys([stale, current], app_config.ranking)
+
+    assert candidates == 1
+    assert frontier == {"current"}
+
+
 def test_missing_or_invalid_metrics_fail_closed(app_config) -> None:
     missing = housing("missing", 70_000, 40)
     missing["priority_transit_component"] = None

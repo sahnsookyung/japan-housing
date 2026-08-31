@@ -22,8 +22,9 @@ Within each eligibility, registration, and cost-evidence tier, priority is a low
 
 For complete cost evidence, ranking price spreads initial and exit costs over three months for the
 landing track and twelve months for the long-term track. Incomplete totals remain in a lower
-evidence tier and use only the verified recurring amount; unknown charges are never imputed. The
-dashboard also offers closer (40/60 price/location), balanced (60/40), cheaper (80/20), and
+evidence tier and use the effective monthly floor from every verified recurring, entry, and exit
+component; unknown charges are labeled and never imputed. The dashboard also offers closer
+(40/60 price/location), balanced (60/40), cheaper (80/20), and
 Pareto-frontier views. The default frontier minimizes effective monthly price against a balanced
 location-burden axis built from midpoint distance plus mean transit/bus and bicycle time across all
 three commute anchors. The dashboard can switch to an independent Kichijoji, Shibuya, or Shinjuku
@@ -68,7 +69,9 @@ uv run japan-housing dashboard
 The `japan-housing` dashboard binds only to <http://127.0.0.1:8766>. Its decision-desk interface
 filters the latest report, compares up to three listings, charts effective monthly price against
 normalized location burden, switches among balanced and per-station Pareto frontiers, and
-recomputes the selected frontier after every filter. It persists
+recomputes the selected frontier after every filter. Filtering, sorting, and bounded pagination
+run against one cached immutable report snapshot; the browser receives at most 200 table rows per
+request plus a compact set of eligible chart points. It persists
 `shortlisted`, `contacted`, `application_started`, `reserved`, and `not_interested` decisions in
 local SQLite state. Missing route evidence remains visible and retains the configured ranking
 penalties; the UI never presents a penalized route as observed.
@@ -88,8 +91,14 @@ The automated registry uses public, robots-permitted entry points only:
   in manual review. Rooms already vacant before 15 September qualify without a ranking penalty;
   only vacancy-soon dates after 28 September are excluded.
 - **Best-Estate.jp** — foreign-resident inventory from public Greater Tokyo under-¥80k and
-  share-house pages. The site's robots-disallowed `/api` routes are never used.
+  share-house pages. Fixed deposit, key-money, move-in administration, insurance, and move-out
+  cleaning amounts are normalized when the detail page states them. Percentage or ranged guarantor
+  charges stay unknown, so those listings cannot enter the actionable Pareto frontier. The site's
+  robots-disallowed `/api` routes are never used.
 - **wagaya Japan** — public Greater Tokyo standard, share-house, and monthly listing pages.
+  Its initial-cost calculator is decomposed so first-month rent is not counted twice; mandatory
+  monthly detail fees and distinct one-time fees are added separately. Approximate estimates,
+  required insurance without a price, and undisclosed exit costs remain review evidence.
   Detail refreshes advance in resumable batches of at most 100 to avoid triggering the portal's
   request protection during large initial crawls.
 
@@ -129,6 +138,14 @@ crawl and requires two complete misses before closing a room.
 - Partial sources may add verified records but cannot close old ones. Failed or drifted sources keep
   the last healthy snapshot. Partial sources retry after one hour. Detail work prioritizes
   never-fetched pages, then oldest successful pages, while failed pages use bounded backoff.
+- Non-authoritative portal records not re-seen for 72 hours become `stale` instead of remaining
+  silently current. A bounded oldest-first sweep revalidates up to 50 Best-Estate pages and 25
+  wagaya pages per source run. Verified pages return to `current`; an explicit 404 or recognized
+  closed page retires the listing. Stale records remain auditable in reports but cannot be routed,
+  ranked on a Pareto frontier, or notified.
+- A host circuit opening stops new detail work for that host while already-started requests drain.
+  Transport failures and parser failures are counted separately, so parser-drift alarms are not
+  inflated by network outages.
 - Every report checks the policy/configuration hash and transactionally reclassifies stale active
   records before sorting. Source coverage and latency/error/cache metrics are included in JSON.
 - Public-transit and bicycle matrices are deduplicated by property coordinates, bounded by an
@@ -136,8 +153,11 @@ crawl and requires two complete misses before closing a room.
   URL, log, report, or state row. Active records are reclassified before route candidates are
   selected. Partial matrix responses are rejected rather than silently used.
 - JSON, CSV, Markdown, and a SHA-256 manifest are staged and validated before `latest.json` changes.
-- Report artifacts are retained for 30 days; state history and unused inactive/cache data are
-  retained for 90 days. Managed crash-orphaned staging data is pruned safely.
+  JSON is compact and directory metadata is synced before the latest pointer changes.
+- Report artifacts retain the newest 42 runs plus daily history within 30 days, subject to a hard
+  1 GiB managed-artifact cap. The currently published run is never removed. State history and
+  unused inactive/cache data are retained for 90 days. Managed crash-orphaned staging data is
+  pruned safely.
 - Exit code `0` means every due source and required commute matrix was healthy, `2` means a valid
   partial report was published, a notification/report delivery failed, or delivery is ambiguous;
   `1` means configuration or publication failed.
@@ -183,7 +203,9 @@ uv run japan-housing bootstrap --notify
 ```
 
 Pin that report message manually if desired. Later notified runs edit it and send new, reactivated,
-or materially improved non-excluded listings once. A network timeout becomes `delivery_unknown`
+or materially improved non-excluded listings once. Changes enter a durable SQLite outbox in the
+same transaction that promotes their records, so a per-run Discord limit or process restart cannot
+drop overflow. A network timeout becomes `delivery_unknown`
 and is not retried automatically because Discord webhooks provide no idempotency key.
 Known server failures and rate limits retry on later runs up to the configured attempt limit. The
 persistent report records HTTP failures in state and the run exits partial when delivery fails.

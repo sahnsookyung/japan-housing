@@ -93,6 +93,8 @@ def _run_summary(outcome: object) -> dict[str, object]:
                 "skipped": outcome.notification.skipped,
                 "unknown": outcome.notification.unknown,
                 "failed": outcome.notification.failed,
+                "queued": outcome.notification.queued,
+                "deferred": outcome.notification.deferred,
             }
             if outcome.notification
             else None
@@ -170,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
                         "skipped": result.skipped,
                         "unknown": result.unknown,
                         "failed": result.failed,
+                        "queued": result.queued,
+                        "deferred": result.deferred,
                     }
                 )
             )

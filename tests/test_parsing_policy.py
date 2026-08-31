@@ -183,6 +183,48 @@ def test_best_estate_is_kept_for_registration_review(
     assert any("registration" in caution for caution in outcome.cautions)
 
 
+def test_best_estate_live_fee_components_are_known_without_guessing_variable_guarantee(
+    app_config: AppConfig,
+) -> None:
+    document = """
+        <html><head>
+          <title>1R Share House For Rent in Tokyo Nakano-ku - Best-Estate</title>
+          <meta name="x-property-layout" content="1R">
+          <meta name="x-property-rent" content="48,000Yen/month">
+        </head><body>
+          <div>Maintenance Fee</div><div>16,500 Yen</div>
+          <div>Deposit</div><div>0 Yen</div>
+          <div>Key Money</div><div>0 Yen</div>
+          <div>Home Insurance</div><div>Not required</div>
+          <div>Occupancy Date</div><div>Immediately</div>
+          <div>Other expenses</div>
+          <div>■入居時事務手数料：30,000円(税込)</div>
+          <div>■退去時清掃費用：16,500円(税込)</div>
+          <div>Guarantor Company</div><div>Subscription required</div>
+          <div>Initial Guarantee fee 30%~100% of monthly total rent</div>
+          <footer>Monthly Apartments</footer>
+        </body></html>
+    """
+    ref = ListingRef(
+        "best_estate",
+        "live-fees",
+        "https://www.best-estate.jp/en/property/live-fees/",
+        "fingerprint",
+    )
+
+    record = normalize_records(ref, "Best-Estate.jp", document)[0]
+    outcome = classify(record, app_config.profile, app_config.ranking)
+
+    assert record.recurring_total_yen == 64_500
+    assert record.initial_cost_yen == 30_000
+    assert record.exit_cost_yen == 16_500
+    assert "variable guarantor costs" in record.unknown_costs
+    assert record.contract_type == "standard"
+    assert outcome.track == "long_term"
+    assert outcome.ranking_price_yen == round((64_500 * 12 + 30_000 + 16_500) / 12)
+    assert outcome.ranking_price_basis == "long_term_known_cost_floor_incomplete_total"
+
+
 def test_coordinate_inconsistent_with_prefecture_is_not_scored(
     app_config: AppConfig, project_root: Path
 ) -> None:
@@ -218,6 +260,100 @@ def test_wagaya_parser_preserves_cost_and_evidence(
     assert record.coordinate_basis == "provider_detail_map_link"
     assert record.availability_confidence == "explicit"
     assert classify(record, app_config.profile, app_config.ranking).name == "review"
+
+
+def test_wagaya_live_calculator_separates_recurring_and_one_time_costs(
+    app_config: AppConfig,
+) -> None:
+    document = """
+        <html><head><title>Room 106 Tokyo | wagaya Japan</title></head><body>
+          <h1>Property Details</h1>
+          <div>Location</div><div>Tokyo Meguro-ku</div>
+          <div>Layout</div><div>1R</div>
+          <div>Current Status</div><div>Vacant</div>
+          <div>Available from</div><div>Immediately</div>
+          <div>Initial Guarantee Fee</div><div>-</div>
+          <div>Renter's Insurance</div><div>Required</div>
+          <div>Agent Fee</div><div>1months</div>
+          <div>Initial costs</div><div>￥30,000</div>
+          <div>System usage fee: 1500 yen (monthly)</div>
+          <div>System usage fee: 1500 yen (monthly)</div>
+          <h2>Initial Cost Estimate</h2><div>Total ¥77,000</div>
+          <div>Approximate estimate only. Please inquire for details.</div>
+          <div>Rent</div><div>¥31,000</div>
+          <div>Maintenance Fee</div><div>¥15,000</div>
+          <div>Deposit</div><div>¥0</div>
+          <div>Key Money</div><div>¥0</div>
+          <div>Agent Fee</div><div>¥31,000</div>
+          <footer>Monthly Rental Property</footer>
+        </body></html>
+    """
+    ref = ListingRef(
+        "wagaya",
+        "live-fees",
+        "https://wagaya-japan.com/en/chintai_detail.php?id=1",
+        "fingerprint",
+    )
+
+    record = normalize_records(ref, "wagaya Japan", document)[0]
+    outcome = classify(record, app_config.profile, app_config.ranking)
+
+    assert record.rent_yen == 31_000
+    assert record.management_fee_yen == 15_000
+    assert record.mandatory_monthly_fees_yen == 1_500
+    assert record.recurring_total_yen == 47_500
+    assert record.initial_cost_yen == 61_000
+    assert record.exit_cost_yen is None
+    assert "renter's insurance amount" in record.unknown_costs
+    assert record.price_validation == "estimate_components_matched_known_floor"
+    assert record.contract_type == "standard"
+    assert outcome.track == "long_term"
+    assert outcome.ranking_price_yen == round((47_500 * 12 + 61_000) / 12)
+    assert outcome.ranking_price_basis == "long_term_known_cost_floor_incomplete_total"
+
+
+@pytest.mark.parametrize(
+    ("source_id", "label", "document"),
+    (
+        (
+            "best_estate",
+            "Best-Estate.jp",
+            """
+                <html><head><title>1K Tokyo - Best-Estate</title>
+                <meta name="x-property-rent" content="50000"></head><body>
+                <div>Maintenance Fee: ¥5,000</div><div>Available now</div>
+                </body></html>
+            """,
+        ),
+        (
+            "wagaya",
+            "wagaya Japan",
+            """
+                <html><head><title>1K Tokyo | wagaya Japan</title></head><body>
+                <h1>Property Details</h1><div>Location: Tokyo Suginami-ku</div>
+                <div>Layout: 1K</div><div>Rent: ¥50,000</div>
+                <div>Maintenance Fee: ¥5,000</div><div>Current Status: Vacant</div>
+                </body></html>
+            """,
+        ),
+    ),
+)
+def test_missing_initial_fee_evidence_is_not_reported_as_zero(
+    source_id: str,
+    label: str,
+    document: str,
+) -> None:
+    ref = ListingRef(
+        source_id,
+        "missing-fees",
+        f"https://example.invalid/{source_id}/missing-fees",
+        "fingerprint",
+    )
+
+    record = normalize_records(ref, label, document)[0]
+
+    assert record.initial_cost_yen is None
+    assert "complete initial cost" in record.unknown_costs
 
 
 def test_gender_restrictions_are_never_only_free_text(

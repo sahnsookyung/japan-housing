@@ -15,6 +15,7 @@ from typing import Any
 from .config import AppConfig
 from .models import SourceRunResult, iso_now
 from .pareto import annotate_pareto_frontier
+from .sources import source_specs
 from .state import StateStore
 
 
@@ -40,12 +41,23 @@ def build_report_payload(
     performance: dict[str, Any],
     config: AppConfig,
 ) -> dict[str, Any]:
+    store.apply_listing_freshness(source_specs())
     reclassified = store.reclassify_active(config.profile, config.ranking, config.routing)
     health = store.source_health()
     statuses = _source_status_map(health)
     records = store.active_records()
     for item in records:
         item["source_status"] = statuses.get(str(item.get("source_id")), "unknown")
+        if item.get("freshness") == "stale":
+            cautions = list(item.get("cautions") or ())
+            cautions.append("listing is stale and requires detail-page revalidation")
+            item["cautions"] = list(dict.fromkeys(cautions))
+            if item.get("classification") == "eligible":
+                item["classification"] = "review"
+                rank_key = list(item.get("rank_key") or ())
+                if rank_key:
+                    rank_key[0] = 1
+                    item["rank_key"] = rank_key
     records.sort(key=lambda item: tuple(item.get("rank_key") or (999, str(item.get("stable_key")))))
     pareto = annotate_pareto_frontier(records, config.ranking, config.routing)
     counts = {name: 0 for name in ("eligible", "review", "excluded")}
@@ -268,6 +280,15 @@ def _markdown(payload: dict[str, Any]) -> str:
         if not selected:
             lines.extend(("None.", ""))
             continue
+        if classification == "excluded":
+            lines.extend(
+                (
+                    f"{len(selected):,} excluded listings are retained in the JSON and CSV files. ",
+                    "They are omitted here to keep the Discord attachment bounded.",
+                    "",
+                )
+            )
+            continue
         for item in selected:
             title = str(item.get("title") or "Untitled").replace("[", "(").replace("]", ")")
             recurring = item.get("recurring_total_yen")
@@ -435,6 +456,14 @@ def _write_text(path: Path, value: str) -> None:
         os.fsync(handle.fileno())
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -457,7 +486,10 @@ def publish_report(root: Path, payload: dict[str, Any]) -> PublishedReport:
     json_path = staging / "housing.json"
     markdown_path = staging / "housing.md"
     csv_path = staging / "housing.csv"
-    _write_text(json_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    _write_text(
+        json_path,
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+    )
     _write_text(markdown_path, _markdown(payload))
     _write_csv(csv_path, payload["housing"])
     manifest = {
@@ -472,6 +504,7 @@ def publish_report(root: Path, payload: dict[str, Any]) -> PublishedReport:
     if final.exists():
         raise RuntimeError("report run directory already exists")
     os.replace(staging, final)
+    _fsync_directory(runs)
     pointer_tmp = root / ".latest.json.tmp"
     pointer = {
         "run_id": run_id,
@@ -480,6 +513,7 @@ def publish_report(root: Path, payload: dict[str, Any]) -> PublishedReport:
     }
     _write_text(pointer_tmp, json.dumps(pointer, indent=2) + "\n")
     os.replace(pointer_tmp, root / "latest.json")
+    _fsync_directory(root)
     return PublishedReport(
         run_id,
         str(payload["status"]),
@@ -491,14 +525,26 @@ def publish_report(root: Path, payload: dict[str, Any]) -> PublishedReport:
     )
 
 
-def prune_reports(root: Path, *, days: int, keep_run_id: str) -> int:
+def _directory_size(path: Path) -> int:
+    return sum(item.stat().st_size for item in path.iterdir() if item.is_file())
+
+
+def prune_reports(
+    root: Path,
+    *,
+    days: int,
+    keep_run_id: str,
+    recent_runs: int | None = None,
+    max_bytes: int | None = None,
+) -> int:
     runs = root / "runs"
     if not runs.is_dir():
         return 0
     cutoff = datetime.now().astimezone() - timedelta(days=days)
     removed = 0
+    retained: list[tuple[Path, datetime, int]] = []
     for child in runs.iterdir():
-        if not child.is_dir() or child.name == keep_run_id:
+        if not child.is_dir():
             continue
         if child.name.startswith(".staging-"):
             modified = datetime.fromtimestamp(child.stat().st_mtime).astimezone()
@@ -510,8 +556,35 @@ def prune_reports(root: Path, *, days: int, keep_run_id: str) -> int:
         if not manifest.is_file():
             continue
         modified = datetime.fromtimestamp(manifest.stat().st_mtime).astimezone()
-        if modified < cutoff:
+        if modified < cutoff and child.name != keep_run_id:
             shutil.rmtree(child)
+            removed += 1
+            continue
+        retained.append((child, modified, _directory_size(child)))
+
+    retained.sort(key=lambda item: item[1], reverse=True)
+    if recent_runs is not None and len(retained) > recent_runs:
+        daily_seen = {
+            modified.date().isoformat() for _child, modified, _size in retained[:recent_runs]
+        }
+        for child, modified, _size in retained[recent_runs:]:
+            day = modified.date().isoformat()
+            if child.name == keep_run_id or day not in daily_seen:
+                daily_seen.add(day)
+                continue
+            shutil.rmtree(child)
+            removed += 1
+        retained = [item for item in retained if item[0].is_dir()]
+
+    if max_bytes is not None:
+        total = sum(size for _child, _modified, size in retained)
+        for child, _modified, size in reversed(retained):
+            if total <= max_bytes:
+                break
+            if child.name == keep_run_id:
+                continue
+            shutil.rmtree(child)
+            total -= size
             removed += 1
     return removed
 

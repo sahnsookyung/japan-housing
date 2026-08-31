@@ -11,7 +11,7 @@ from math import asin, cos, radians, sin, sqrt
 from .config import RankingConfig, RoutingConfig, SearchProfile
 from .models import Classification, CommuteSummary, CostScenario, HousingRecord
 
-POLICY_VERSION = 3
+POLICY_VERSION = 4
 
 
 def cost_scenario(record: HousingRecord, months: int) -> CostScenario:
@@ -273,6 +273,10 @@ def classify(
         ranking_price_basis = (
             "three_month_effective" if track == "landing" else "long_term_effective"
         )
+    elif scenario.effective_monthly_yen is not None:
+        ranking_price = scenario.effective_monthly_yen
+        horizon = "three_month" if track == "landing" else "long_term"
+        ranking_price_basis = f"{horizon}_known_cost_floor_incomplete_total"
     else:
         ranking_price = record.recurring_total_yen
         ranking_price_basis = "recurring_only_incomplete_total_cost"

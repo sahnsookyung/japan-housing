@@ -39,6 +39,8 @@ class SourceSpec:
     interval_hours: int = 12
     authoritative_disappearance: bool = False
     detail_budget_per_run: int | None = None
+    stale_after_hours: int | None = 72
+    stale_revalidation_budget: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +295,7 @@ def source_specs() -> tuple[SourceSpec, ...]:
             discovery_mode="list",
             interval_hours=4,
             authoritative_disappearance=True,
+            stale_after_hours=None,
         ),
         SourceSpec(
             "best_estate",
@@ -301,6 +304,7 @@ def source_specs() -> tuple[SourceSpec, ...]:
             frozenset({"www.best-estate.jp", "best-estate.jp"}),
             (r"https://(?:www\.)?best-estate\.jp/en/property/\d+/?$",),
             interval_hours=12,
+            stale_revalidation_budget=50,
         ),
         SourceSpec(
             "wagaya",
@@ -310,6 +314,7 @@ def source_specs() -> tuple[SourceSpec, ...]:
             (r"https://(?:www\.)?wagaya-japan\.com/en/chintai_detail\.php\?id=\d+(?:&[^#]*)?$",),
             interval_hours=12,
             detail_budget_per_run=100,
+            stale_revalidation_budget=25,
         ),
     )
 

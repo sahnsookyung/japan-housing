@@ -43,6 +43,8 @@ def test_profile_matches_move_window_and_safe_runtime(project_root: Path) -> Non
     assert config.routing.batch_origins * len(config.routing.anchors) <= 100
     assert config.runtime.dashboard_host == "127.0.0.1"
     assert config.runtime.user_agent == DEFAULT_USER_AGENT
+    assert config.runtime.report_recent_runs == 42
+    assert config.runtime.report_retention_max_bytes == 1024 * 1024 * 1024
 
 
 def test_invalid_move_window_is_rejected(project_root: Path, tmp_path: Path) -> None:
@@ -67,6 +69,8 @@ def test_missing_runtime_values_use_real_defaults(project_root: Path, tmp_path: 
     assert config.runtime.global_workers == 8
     assert config.runtime.partial_retry_minutes == 60
     assert config.runtime.report_retention_days == 30
+    assert config.runtime.report_recent_runs == 42
+    assert config.runtime.report_retention_max_bytes == 1024 * 1024 * 1024
 
 
 def test_ranking_weights_must_sum_to_one(project_root: Path, tmp_path: Path) -> None:

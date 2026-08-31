@@ -1,7 +1,6 @@
 "use strict";
 
 import {
-  housingParetoFrontierIds,
   housingParetoLocation,
   housingParetoPoints,
 } from "/housing-pareto.mjs";
@@ -18,8 +17,16 @@ const controls = {
 };
 const state = {
   report: null,
-  selected: new Set(),
+  records: [],
+  paretoRecords: [],
+  frontierIds: new Set(),
+  total: 0,
+  filteredTotal: 0,
+  offset: 0,
+  limit: 100,
+  selected: new Map(),
   focusedKey: "",
+  requestSequence: 0,
 };
 
 function node(tag, options = {}, children = []) {
@@ -57,35 +64,6 @@ function safeLink(url, label) {
 
 function yen(value) {
   return Number.isFinite(value) ? `¥${Math.round(value).toLocaleString()}` : "Unknown";
-}
-
-function listingText(item) {
-  return [
-    item.title,
-    item.property_name,
-    item.prefecture,
-    item.city,
-    ...(item.nearest_stations || []),
-  ].join(" ").toLocaleLowerCase();
-}
-
-function matchesBase(item) {
-  const query = controls.query.value.trim().toLocaleLowerCase();
-  const classification = controls.classification.value;
-  const maxCost = Number(controls.maxCost.value || 0);
-  if (query && !listingText(item).includes(query)) return false;
-  if (classification === "actionable" && item.classification === "excluded") return false;
-  if (!["actionable", "all"].includes(classification) && item.classification !== classification) return false;
-  if (controls.track.value !== "all" && item.track !== controls.track.value) return false;
-  if (controls.decision.value !== "all" && item.decision_status !== controls.decision.value) return false;
-  if (maxCost && (!Number.isInteger(item.recurring_total_yen) || item.recurring_total_yen > maxCost)) return false;
-  return true;
-}
-
-function priorityFor(item) {
-  if (controls.rankingView.value === "closer") return item.priority_closer_score;
-  if (controls.rankingView.value === "cheaper") return item.priority_cheaper_score;
-  return item.priority_score;
 }
 
 function anchorLabel() {
@@ -155,31 +133,6 @@ function commuteText(item, mode) {
   return `${label}: pending (${coverage}/${anchorCount}); ${scoredText}`;
 }
 
-function compareRank(left, right) {
-  if (controls.rankingView.value === "pareto") {
-    const leftLocation = perspectiveLocation(left);
-    const rightLocation = perspectiveLocation(right);
-    return (
-      (Number.isFinite(leftLocation) ? leftLocation : Number.POSITIVE_INFINITY) -
-        (Number.isFinite(rightLocation) ? rightLocation : Number.POSITIVE_INFINITY) ||
-      (left.ranking_price_yen ?? Number.POSITIVE_INFINITY) -
-        (right.ranking_price_yen ?? Number.POSITIVE_INFINITY) ||
-      String(left.stable_key).localeCompare(String(right.stable_key))
-    );
-  }
-  const leftKey = [...(left.rank_key || [999])];
-  const rightKey = [...(right.rank_key || [999])];
-  leftKey[3] = priorityFor(left);
-  rightKey[3] = priorityFor(right);
-  for (let index = 0; index < Math.max(leftKey.length, rightKey.length); index += 1) {
-    const a = leftKey[index] ?? "";
-    const b = rightKey[index] ?? "";
-    if (a < b) return -1;
-    if (a > b) return 1;
-  }
-  return 0;
-}
-
 function detailBlock(item, frontier) {
   const wrap = node("div", { className: "property-cell" });
   const badges = node("div", { className: "badge-row" });
@@ -238,7 +191,7 @@ function compareButton(item) {
   button.setAttribute("aria-pressed", String(selected));
   button.addEventListener("click", () => {
     if (selected) state.selected.delete(item.stable_key);
-    else if (state.selected.size < 3) state.selected.add(item.stable_key);
+    else if (state.selected.size < 3) state.selected.set(item.stable_key, item);
     else showError("Compare up to three homes at a time.");
     render();
   });
@@ -308,7 +261,7 @@ function scenarioText(item) {
 function renderCompare() {
   const section = document.querySelector("#compare-section");
   const container = document.querySelector("#compare");
-  const selected = (state.report?.housing || []).filter((item) => state.selected.has(item.stable_key));
+  const selected = [...state.selected.values()];
   section.hidden = selected.length === 0;
   container.replaceChildren();
   for (const item of selected) {
@@ -497,17 +450,14 @@ function showError(message) {
 function render() {
   if (!state.report) return;
   showError("");
-  const baseRecords = (state.report.housing || []).filter(matchesBase);
+  const baseRecords = state.paretoRecords;
   const perspective = paretoPerspective();
-  const frontierIds = housingParetoFrontierIds(baseRecords, perspective.id);
-  const records = (controls.rankingView.value === "pareto"
-    ? baseRecords.filter((item) => frontierIds.has(item.stable_key))
-    : baseRecords
-  ).sort(compareRank);
+  const frontierIds = state.frontierIds;
+  const records = state.records;
 
-  document.querySelector("#result-count").textContent = records.length;
+  document.querySelector("#result-count").textContent = state.total;
   document.querySelector("#frontier-feedback").textContent =
-    `${records.length} shown · ${frontierIds.size} ${perspective.label} efficient among ${baseRecords.length} filtered`;
+    `${records.length} on this page · ${frontierIds.size} ${perspective.label} efficient among ${state.filteredTotal} filtered`;
   document.querySelector("#pareto-heading").textContent = `${perspective.label} frontier`;
   document.querySelector("#pareto-axis-context").textContent =
     `PRICE ↓ · ${perspective.label.toUpperCase()} BURDEN ↓`;
@@ -523,13 +473,55 @@ function render() {
   renderSummary();
   renderFallbacks();
   renderSourceHealth();
+  const page = Math.floor(state.offset / state.limit) + 1;
+  const pages = Math.max(1, Math.ceil(state.total / state.limit));
+  document.querySelector("#page-status").textContent = `Page ${page} of ${pages}`;
+  document.querySelector("#previous-page").disabled = state.offset === 0;
+  document.querySelector("#next-page").disabled = state.offset + records.length >= state.total;
+}
+
+async function loadListings(offset = 0) {
+  if (!state.report) return;
+  const sequence = ++state.requestSequence;
+  const parameters = new URLSearchParams({
+    classification: controls.classification.value,
+    track: controls.track.value,
+    decision: controls.decision.value,
+    max_cost: controls.maxCost.value || "0",
+    ranking: controls.rankingView.value,
+    perspective: paretoPerspectiveId(),
+    query: controls.query.value.trim(),
+    offset: String(Math.max(0, offset)),
+    limit: String(state.limit),
+  });
+  document.querySelector("#refresh-state").textContent = "Loading listings…";
+  try {
+    const response = await fetch(`/api/listings?${parameters}`, { cache: "no-cache" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Could not load listings");
+    if (sequence !== state.requestSequence) return;
+    state.records = payload.records || [];
+    state.paretoRecords = payload.pareto_records || [];
+    state.frontierIds = new Set(payload.frontier_ids || []);
+    state.total = Number(payload.total || 0);
+    state.filteredTotal = Number(payload.filtered_total || 0);
+    state.offset = Number(payload.offset || 0);
+    if (state.focusedKey && !state.paretoRecords.some((item) => item.stable_key === state.focusedKey)) {
+      state.focusedKey = "";
+    }
+    render();
+  } catch (error) {
+    if (sequence !== state.requestSequence) return;
+    document.querySelector("#refresh-state").textContent = "Listings unavailable";
+    showError(error.message);
+  }
 }
 
 async function load() {
   showError("");
   document.querySelector("#refresh-state").textContent = "Refreshing report…";
   try {
-    const response = await fetch("/api/report", { cache: "no-store" });
+    const response = await fetch("/api/report", { cache: "no-cache" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not load the report");
     state.report = payload;
@@ -554,17 +546,26 @@ async function load() {
       const option = controls.rankingView.querySelector(`option[value="${name}"]`);
       if (option) option.textContent = `${name[0].toUpperCase()}${name.slice(1)} · ${Math.round(weights.price_weight * 100)}% price`;
     }
-    const keys = new Set((payload.housing || []).map((item) => item.stable_key));
-    state.selected = new Set([...state.selected].filter((key) => keys.has(key)));
-    if (!keys.has(state.focusedKey)) state.focusedKey = "";
-    render();
+    await loadListings(0);
   } catch (error) {
     document.querySelector("#refresh-state").textContent = "Report unavailable";
     showError(error.message);
   }
 }
 
-for (const control of Object.values(controls)) control.addEventListener("input", render);
+let queryTimer = 0;
+controls.query.addEventListener("input", () => {
+  window.clearTimeout(queryTimer);
+  queryTimer = window.setTimeout(() => loadListings(0), 250);
+});
+for (const control of [
+  controls.classification,
+  controls.track,
+  controls.decision,
+  controls.maxCost,
+  controls.rankingView,
+  controls.paretoPerspective,
+]) control.addEventListener("change", () => loadListings(0));
 document.querySelector("#refresh").addEventListener("click", load);
 document.querySelector("#reset").addEventListener("click", () => {
   controls.query.value = "";
@@ -574,7 +575,7 @@ document.querySelector("#reset").addEventListener("click", () => {
   controls.maxCost.value = "80000";
   controls.rankingView.value = "balanced";
   controls.paretoPerspective.value = "balanced";
-  render();
+  loadListings(0);
 });
 document.querySelector("#clear-compare").addEventListener("click", () => {
   state.selected.clear();
@@ -583,17 +584,25 @@ document.querySelector("#clear-compare").addEventListener("click", () => {
 document.querySelector("#summary-eligible-card").addEventListener("click", () => {
   controls.classification.value = "eligible";
   controls.rankingView.value = "balanced";
-  render();
+  loadListings(0);
 });
 document.querySelector("#summary-review-card").addEventListener("click", () => {
   controls.classification.value = "review";
   controls.rankingView.value = "balanced";
-  render();
+  loadListings(0);
 });
 document.querySelector("#summary-pareto-card").addEventListener("click", () => {
   controls.classification.value = "eligible";
   controls.rankingView.value = "pareto";
-  render();
+  loadListings(0);
+});
+document.querySelector("#previous-page").addEventListener("click", () => {
+  loadListings(Math.max(0, state.offset - state.limit));
+});
+document.querySelector("#next-page").addEventListener("click", () => {
+  if (state.offset + state.records.length < state.total) {
+    loadListings(state.offset + state.limit);
+  }
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {

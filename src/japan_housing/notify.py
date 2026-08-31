@@ -25,6 +25,8 @@ class NotificationResult:
     skipped: int
     unknown: int
     failed: int
+    queued: int = 0
+    deferred: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,14 +125,18 @@ def notify_changes(
 ) -> NotificationResult:
     webhook = _with_wait(validate_webhook_url(webhook_url))
     sent = skipped = unknown = failed = 0
-    retryable = store.retryable_notifications(max_attempts=max_attempts)
-    seen = {(str(item.get("stable_key")), str(item.get("fingerprint"))) for item in changes}
-    candidates = [item for item in changes if item.get("classification") != "excluded"]
-    candidates.extend(
+    store.recover_abandoned_notification_reservations()
+    queueable = [
         item
-        for item in retryable
-        if (str(item.get("stable_key")), str(item.get("fingerprint"))) not in seen
-    )
+        for item in changes
+        if item.get("classification") != "excluded"
+        and (
+            not isinstance(item.get("record"), dict)
+            or item["record"].get("freshness", "current") == "current"
+        )
+    ]
+    queued = store.enqueue_notification_changes(queueable)
+    candidates = store.pending_notifications(max_attempts=max_attempts)
     candidates.sort(
         key=lambda item: (
             0 if item.get("classification") == "eligible" else 1,
@@ -142,11 +148,12 @@ def notify_changes(
             str(item.get("stable_key")),
         )
     )
+    deferred = max(0, len(candidates) - limit)
     with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
         for change in candidates[:limit]:
             stable_key = str(change["stable_key"])
             fingerprint = str(change["fingerprint"])
-            if not store.reserve_notification(stable_key, fingerprint, max_attempts=max_attempts):
+            if not store.claim_notification(stable_key, fingerprint, max_attempts=max_attempts):
                 skipped += 1
                 continue
             payload = {
@@ -189,7 +196,7 @@ def notify_changes(
                     error=type(exc).__name__,
                 )
                 unknown += 1
-    return NotificationResult(sent, skipped, unknown, failed)
+    return NotificationResult(sent, skipped, unknown, failed, queued, deferred)
 
 
 def _report_content(payload: dict[str, object]) -> str:

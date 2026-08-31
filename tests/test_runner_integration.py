@@ -7,7 +7,7 @@ from threading import Barrier
 
 import japan_housing.runner as runner
 from japan_housing.config import AppConfig
-from japan_housing.http import HttpMetrics, HttpResponse
+from japan_housing.http import CircuitOpen, HttpMetrics, HttpResponse
 from japan_housing.models import HOUSING_RECORD_SCHEMA_VERSION, HousingRecord, ListingRef
 from japan_housing.notify import ReportMessageResult
 from japan_housing.routing import CommuteEnrichmentResult
@@ -61,6 +61,29 @@ class _FixtureAdapter:
         return HttpResponse(ref.url, 200, self.document, len(self.document), {})
 
 
+def test_bounded_map_stops_scheduling_after_circuit_open() -> None:
+    called: list[int] = []
+
+    def work(value: int) -> int:
+        called.append(value)
+        if value == 2:
+            raise CircuitOpen("fixture circuit")
+        return value
+
+    results = list(
+        runner._bounded_map(
+            work,
+            range(10),
+            workers=1,
+            max_queued=1,
+            stop_on=(CircuitOpen,),
+        )
+    )
+
+    assert called == [0, 1, 2]
+    assert isinstance(results[-1][1], CircuitOpen)
+
+
 def _cached_record(schema_version: int = HOUSING_RECORD_SCHEMA_VERSION) -> HousingRecord:
     return HousingRecord(
         schema_version=schema_version,
@@ -96,6 +119,29 @@ def test_old_record_schema_forces_detail_revalidation(app_config: AppConfig) -> 
     assert not runner._cache_reusable(ref, cache, app_config)
 
 
+def test_staging_fallback_cache_does_not_claim_a_new_parser_schema(
+    app_config: AppConfig,
+) -> None:
+    record = _cached_record(schema_version=1)
+    ref = ListingRef("oakhouse", "1", record.url, "fingerprint")
+
+    class Store:
+        staged: list[tuple[str, HousingRecord, object]] = []
+
+        def commute_summary(self, *args, **kwargs):
+            return None
+
+        def stage_many(self, run_id: str, staged) -> None:
+            self.staged.extend(staged)
+
+    store = Store()
+
+    runner._stage_records(store, "run", ref, (record,), app_config)
+
+    assert record.schema_version == 1
+    assert store.staged[0][1].schema_version == 1
+
+
 def test_cache_ttl_uses_current_policy_not_stored_classification(app_config: AppConfig) -> None:
     ref = ListingRef("best_estate", "1", "https://www.best-estate.jp/en/property/1/", "fp")
     record = HousingRecord(
@@ -129,6 +175,95 @@ def test_cache_ttl_uses_current_policy_not_stored_classification(app_config: App
     )
 
     assert not runner._cache_reusable(ref, cache, app_config)
+
+
+def test_stale_revalidation_cannot_be_starved_by_current_backlog(
+    app_config: AppConfig,
+    project_root: Path,
+    tmp_path: Path,
+) -> None:
+    runtime = replace(
+        app_config.runtime,
+        state_path=tmp_path / "state.sqlite3",
+        artifacts_path=tmp_path / "artifacts",
+        detail_budget_per_source=1,
+        per_host_workers=1,
+        max_queued_tasks=1,
+    )
+    config = replace(app_config, runtime=runtime)
+    spec = SourceSpec(
+        "best_estate",
+        "Best-Estate.jp",
+        ("https://www.best-estate.jp/en/list",),
+        frozenset({"www.best-estate.jp"}),
+        (r"/en/property/\d+/$",),
+        stale_after_hours=1,
+        stale_revalidation_budget=1,
+    )
+    stale_ref = ListingRef(
+        "best_estate",
+        "stale-page",
+        "https://www.best-estate.jp/en/property/100/",
+        "old-fingerprint",
+    )
+    stale_record = replace(
+        _cached_record(),
+        source_id="best_estate",
+        source_label="Best-Estate.jp",
+        external_id="stale-unit",
+        url=stale_ref.url,
+    )
+    outcome = runner.classify(stale_record, config.profile, config.ranking)
+    fetched: list[str] = []
+    document = (project_root / "tests" / "fixtures" / "best_estate.html").read_text(
+        encoding="utf-8"
+    )
+
+    class RevalidationAdapter:
+        def __init__(self) -> None:
+            self.spec = spec
+
+        def discover(self, cursor: str | None, budget: int) -> DiscoveryBatch:
+            current = ListingRef(
+                "best_estate",
+                "current-page",
+                "https://www.best-estate.jp/en/property/200/",
+                "new-fingerprint",
+            )
+            return DiscoveryBatch((current,), None, 1, True)
+
+        def fetch_detail(
+            self,
+            ref: ListingRef,
+            *,
+            etag: str = "",
+            last_modified: str = "",
+        ) -> HttpResponse:
+            fetched.append(ref.external_id)
+            return HttpResponse(ref.url, 200, document, len(document), {})
+
+    with runner.StateStore(runtime.state_path) as store:
+        store.ensure_sources((spec,))
+        store.begin_source_run("seed", spec.source_id)
+        store.stage("seed", stale_ref.external_id, stale_record, outcome)
+        store.promote("seed", spec)
+        store.cache_page(stale_ref, [stale_record], [outcome])
+        old = (datetime.now().astimezone() - timedelta(hours=2)).isoformat()
+        with store.connection:
+            store.connection.execute("UPDATE records SET last_seen_at=?", (old,))
+        store.apply_listing_freshness((spec,))
+
+        result = runner._run_source(
+            RevalidationAdapter(),
+            store,
+            config,
+            "refresh",
+            _FixtureClient(config),
+        )
+
+    assert fetched == ["stale-page"]
+    assert result.metrics.stale_revalidation_candidates == 1
+    assert result.metrics.stale_revalidated == 1
 
 
 def test_full_refresh_promotes_records_and_publishes_report(

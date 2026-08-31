@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -71,6 +72,29 @@ def _promote(store: StateStore, config: AppConfig, run_id: str) -> None:
         classify(record, config.profile, config.ranking),
     )
     store.promote(run_id, _spec(), complete=True)
+
+
+def test_existing_records_schema_adds_freshness_before_its_index(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(state_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE records (
+                stable_key TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+
+    with StateStore(state_path) as store:
+        columns = {row["name"] for row in store.connection.execute("PRAGMA table_info(records)")}
+        indexes = {row["name"] for row in store.connection.execute("PRAGMA index_list(records)")}
+
+    assert "freshness" in columns
+    assert "records_freshness_revalidation" in indexes
 
 
 def test_partial_snapshot_cannot_close_and_two_complete_misses_can(
@@ -146,6 +170,93 @@ def test_known_notification_failure_can_retry_with_a_bound(
         assert not store.reserve_notification(key, "fingerprint", max_attempts=2)
 
 
+def test_transactional_notification_outbox_preserves_overflow(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    records = [replace(_record(), external_id=f"unit-{index}") for index in range(25)]
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((_spec(),))
+        store.begin_source_run("bulk", "fixture")
+        store.stage_many(
+            "bulk",
+            (
+                (
+                    f"page-{index}",
+                    record,
+                    classify(record, app_config.profile, app_config.ranking),
+                )
+                for index, record in enumerate(records)
+            ),
+        )
+        store.promote("bulk", _spec(), enqueue_changes=True)
+
+        pending = store.pending_notifications()
+        assert len(pending) == 25
+        for item in pending[:20]:
+            assert store.claim_notification(item["stable_key"], item["fingerprint"])
+            store.finish_notification(item["stable_key"], item["fingerprint"], "sent")
+
+        assert len(store.pending_notifications()) == 5
+
+
+def test_abandoned_notification_reservation_fails_closed(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((_spec(),))
+        _promote(store, app_config, "initial")
+        key = _record().stable_key
+        assert store.reserve_notification(key, "fingerprint")
+        old = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+        with store.connection:
+            store.connection.execute(
+                "UPDATE notifications SET reserved_at=?",
+                (old,),
+            )
+
+        assert store.recover_abandoned_notification_reservations(minutes=30) == 1
+        assert store.unknown_notifications()[0]["last_error"] == "abandoned reservation"
+
+
+def test_non_authoritative_records_become_stale_then_revalidate_or_close(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    spec = replace(
+        _spec(),
+        authoritative_disappearance=False,
+        stale_after_hours=1,
+        stale_revalidation_budget=1,
+    )
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((spec,))
+        _promote(store, app_config, "initial")
+        old = (datetime.now().astimezone() - timedelta(hours=2)).isoformat()
+        with store.connection:
+            store.connection.execute("UPDATE records SET last_seen_at=?", (old,))
+        assert store.apply_listing_freshness((spec,)) == {"fixture": 1}
+        assert store.active_records()[0]["freshness"] == "stale"
+        refs = store.stale_revalidation_refs(
+            "fixture", exclude_page_ids=set(), limit=spec.stale_revalidation_budget
+        )
+        assert [ref.external_id for ref in refs] == ["page-1"]
+
+        store.begin_source_run("fresh", "fixture")
+        record = _record()
+        store.stage(
+            "fresh",
+            "page-1",
+            record,
+            classify(record, app_config.profile, app_config.ranking),
+        )
+        store.promote("fresh", spec)
+        assert store.active_records()[0]["freshness"] == "current"
+
+        store.begin_source_run("closed", "fixture")
+        result = store.promote("closed", spec, complete=False, closed_page_ids={"page-1"})
+        assert result.closed == 1
+        assert store.active_records() == []
+
+
 def test_never_fetched_details_are_ordered_before_stale_cache(tmp_path: Path) -> None:
     first = ListingRef("fixture", "1", "https://source.example/detail/1", "one")
     second = ListingRef("fixture", "2", "https://source.example/detail/2", "two")
@@ -211,6 +322,7 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     assert "Anchor-specific Pareto frontiers: Kichijoji Station 1/1" in markdown
     manifest = json.loads((published.directory / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"housing.json", "housing.md", "housing.csv"}
+    assert '\n  "schema_version"' not in published.json_path.read_text(encoding="utf-8")
     with pytest.raises(RuntimeError, match="already exists"):
         publish_report(tmp_path / "artifacts", payload)
 
@@ -280,11 +392,26 @@ def test_persisted_partial_source_keeps_offline_report_partial(
     with StateStore(tmp_path / "state.sqlite3") as store:
         store.ensure_sources((_spec(),))
         _promote(store, app_config, "initial")
-        store.finish_source_run("initial", "fixture", "partial", SourceMetrics(discovered=2), "cap")
+        store.finish_source_run(
+            "initial",
+            "fixture",
+            "partial",
+            SourceMetrics(
+                discovered=2,
+                detail_fetch_failures=2,
+                stale_revalidation_candidates=4,
+                stale_revalidated=1,
+            ),
+            "cap",
+        )
         payload = build_report_payload(store, "report", [], {"offline": True}, app_config)
 
     assert payload["status"] == "partial"
     assert payload["source_coverage"][0]["status"] == "partial"
+    assert payload["source_coverage"][0]["verified_page_ratio"] == 0.0
+    assert payload["source_coverage"][0]["detail_fetch_failures"] == 2
+    assert payload["source_coverage"][0]["stale_revalidation_candidates"] == 4
+    assert payload["source_coverage"][0]["stale_revalidated"] == 1
 
 
 def test_partial_source_uses_short_retry_interval(app_config: AppConfig, tmp_path: Path) -> None:
@@ -319,3 +446,27 @@ def test_report_retention_only_removes_old_manifested_runs(tmp_path: Path) -> No
     assert not old.exists()
     assert current.exists()
     assert unknown.exists()
+
+
+def test_report_retention_enforces_storage_cap(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    directories = [runs / name for name in ("old", "middle", "current")]
+    for index, directory in enumerate(directories):
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text("{}", encoding="utf-8")
+        (directory / "housing.json").write_bytes(b"x" * 100)
+        timestamp = (datetime.now().astimezone() - timedelta(hours=3 - index)).timestamp()
+        os.utime(directory / "manifest.json", (timestamp, timestamp))
+    per_run = sum(path.stat().st_size for path in directories[-1].iterdir())
+
+    removed = prune_reports(
+        tmp_path,
+        days=30,
+        keep_run_id="current",
+        max_bytes=per_run * 2,
+    )
+
+    assert removed == 1
+    assert not directories[0].exists()
+    assert directories[1].exists()
+    assert directories[2].exists()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -256,6 +257,9 @@ class GoogleRoutesClient:
             try:
                 response = self._client.post(ROUTES_API_URL, json=payload)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt == 0:
+                    time.sleep(0.5 * random.uniform(0.75, 1.25))
+                    continue
                 raise RoutesApiError(
                     f"Google Routes transport failure: {type(exc).__name__}"
                 ) from exc
@@ -341,6 +345,8 @@ def enrich_commutes(
                     break
     except RoutesApiError as exc:
         error = str(exc)
+    if requested_elements:
+        store.reclassify_active(config.profile, config.ranking, routing)
     deferred = sum(len(values) for values in pending.values())
     if error:
         status = "failed" if not requested_elements else "partial"
