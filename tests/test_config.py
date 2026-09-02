@@ -13,6 +13,7 @@ def test_profile_matches_move_window_and_safe_runtime(project_root: Path) -> Non
     assert config.profile.move_in_earliest.isoformat() == "2026-09-15"
     assert config.profile.move_in_latest.isoformat() == "2026-09-28"
     assert config.profile.monthly_budget_yen == 80_000
+    assert config.profile.strict_evidence is True
     assert config.profile.commute_anchors == (
         "Kichijoji Station",
         "Shibuya Station",
@@ -54,6 +55,16 @@ def test_invalid_move_window_is_rejected(project_root: Path, tmp_path: Path) -> 
     path.write_text(invalid, encoding="utf-8")
 
     with pytest.raises(ValueError, match="cannot be before"):
+        load_config(path)
+
+
+def test_strict_evidence_requires_a_boolean(project_root: Path, tmp_path: Path) -> None:
+    profile = (project_root / "config" / "profile.toml").read_text(encoding="utf-8")
+    invalid = profile.replace("strict_evidence = true", 'strict_evidence = "true"')
+    path = tmp_path / "invalid-strict-evidence.toml"
+    path.write_text(invalid, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="strict_evidence must be a boolean"):
         load_config(path)
 
 

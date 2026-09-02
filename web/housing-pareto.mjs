@@ -15,6 +15,7 @@ export function housingParetoLocation(item, perspectiveId = "balanced") {
 export function housingParetoCandidate(item, perspectiveId = "balanced") {
   if (item?.classification !== "eligible") return null;
   if (NON_ACTIONABLE_DECISIONS.has(item?.decision_status || "new")) return null;
+  if (String(item?.ranking_price_basis || "").includes("incomplete")) return null;
   const stableKey = String(item?.stable_key || "");
   const price = finiteNumber(item?.ranking_price_yen);
   const location = housingParetoLocation(item, perspectiveId);

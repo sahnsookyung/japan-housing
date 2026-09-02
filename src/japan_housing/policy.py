@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, timedelta
 from math import asin, cos, radians, sin, sqrt
 
 from .config import RankingConfig, RoutingConfig, SearchProfile
 from .models import Classification, CommuteSummary, CostScenario, HousingRecord
 
-POLICY_VERSION = 4
+POLICY_VERSION = 9
+PROVIDER_UPDATE_GRACE_DAYS = 14
 
 
 def cost_scenario(record: HousingRecord, months: int) -> CostScenario:
@@ -168,7 +169,22 @@ def classify(
     reasons: list[str] = []
     cautions: list[str] = []
     excluded: list[str] = []
+    has_unresolved_requirement = False
     is_oakhouse = record.source_id == "oakhouse"
+
+    if record.provider_next_update_at:
+        try:
+            provider_next_update = date.fromisoformat(record.provider_next_update_at)
+        except ValueError:
+            provider_next_update = None
+        if (
+            provider_next_update is not None
+            and provider_next_update + timedelta(days=PROVIDER_UPDATE_GRACE_DAYS) < date.today()
+        ):
+            excluded.append(
+                "provider listing freshness expired: next update was "
+                f"{provider_next_update.isoformat()}"
+            )
 
     if record.prefecture and record.prefecture not in profile.target_prefectures:
         excluded.append(f"outside target prefectures: {record.prefecture}")
@@ -176,10 +192,12 @@ def classify(
         reasons.append(f"target prefecture: {record.prefecture}")
     else:
         cautions.append("prefecture not verified")
+        has_unresolved_requirement = True
 
     if record.housing_type not in profile.allowed_housing_types:
         if record.housing_type == "unknown":
             cautions.append("housing type not verified")
+            has_unresolved_requirement = True
         else:
             excluded.append(f"unsupported housing type: {record.housing_type}")
     if profile.private_space_required:
@@ -187,6 +205,7 @@ def classify(
             excluded.append("no private sleeping room")
         elif record.private_space is None:
             cautions.append("private room not verified")
+            has_unresolved_requirement = True
         else:
             reasons.append("private sleeping space")
 
@@ -197,6 +216,7 @@ def classify(
 
     if record.recurring_total_yen is None:
         cautions.append("mandatory recurring total is incomplete")
+        has_unresolved_requirement = True
     elif record.recurring_total_yen > profile.monthly_budget_yen:
         total = f"¥{record.recurring_total_yen:,}"
         budget = f"¥{profile.monthly_budget_yen:,}"
@@ -208,12 +228,14 @@ def classify(
     if is_oakhouse:
         if record.price_basis != "available_room":
             cautions.append("Oakhouse price is not tied to an available room")
+            has_unresolved_requirement = True
         elif record.price_validation in {"matched", "components_only"}:
             reasons.append("available-room rent and mandatory monthly fee verified")
         else:
             cautions.append(
                 f"available-room price validation requires review: {record.price_validation}"
             )
+            has_unresolved_requirement = True
         if (
             record.advertised_monthly_from_yen is not None
             and record.recurring_total_yen is not None
@@ -230,30 +252,41 @@ def classify(
         excluded.append("Oakhouse room is not marked vacant or vacancy-soon")
     elif available and available > profile.move_in_latest:
         message = f"available after landing window: {available.isoformat()}"
-        if is_oakhouse:
-            excluded.append(message)
-        else:
-            cautions.append(message)
+        excluded.append(message)
+    elif (
+        record.source_availability_status == "occupied"
+        and record.availability_confidence == "unknown"
+    ):
+        excluded.append("occupied with no verified move-out date")
     elif record.availability_confidence in {"explicit", "available_now"}:
         reasons.append(f"availability evidence: {availability_evidence}")
     elif is_oakhouse:
         excluded.append("Oakhouse availability date is not verified for the landing window")
+    elif profile.strict_evidence:
+        excluded.append("move-in date is not verified for the landing window")
     else:
         cautions.append("move-in availability requires confirmation")
+        has_unresolved_requirement = True
 
     if not record.foreigner_evidence:
         cautions.append("foreigner acceptance not verified")
+        has_unresolved_requirement = True
     else:
         reasons.append("foreigner acceptance evidence present")
     if not record.overseas_application_evidence:
         cautions.append("overseas application path not verified")
+        has_unresolved_requirement = True
     if profile.registration_required:
         if record.registration_confidence == "confirmed":
             reasons.append("address registration confirmed by provider evidence")
+        elif record.registration_confidence == "standard_residential":
+            reasons.append("standard residential lease supports address registration")
         elif record.registration_confidence == "probable":
             cautions.append("address registration is probable but must be confirmed")
+            has_unresolved_requirement = True
         else:
             cautions.append("address registration must be confirmed before booking")
+            has_unresolved_requirement = True
 
     landing_30 = cost_scenario(record, 1)
     landing_60 = cost_scenario(record, 2)
@@ -307,8 +340,8 @@ def classify(
     if excluded:
         name = "excluded"
         reasons.extend(excluded)
-    elif cautions:
-        name = "review"
+    elif has_unresolved_requirement:
+        name = "unverified" if profile.strict_evidence else "review"
     else:
         name = "eligible"
     deadline_penalty = 0
@@ -316,8 +349,9 @@ def classify(
         deadline_penalty = max(0, (available - profile.move_in_earliest).days)
     elif record.availability_confidence != "available_now":
         deadline_penalty = 9999
+    classification_rank = {"eligible": 0, "review": 1, "unverified": 2, "excluded": 3}
     rank_key = (
-        0 if name == "eligible" else 1 if name == "review" else 2,
+        classification_rank[name],
         0 if record.registration_confidence == "confirmed" else 1,
         0 if scenario.complete else 1,
         priority.score,

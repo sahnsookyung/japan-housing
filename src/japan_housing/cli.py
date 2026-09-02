@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import load_config
 from .dashboard import serve_dashboard
 from .locking import AlreadyRunning, ProcessLock
+from .models import ACTIONABLE_CLASSIFICATIONS
 from .notify import (
     notify_changes,
     resolve_webhook_url,
@@ -153,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                         "record": item,
                     }
                     for item in store.active_records()
-                    if item["classification"] != "excluded"
+                    if item["classification"] in ACTIONABLE_CLASSIFICATIONS
                     and item["decision_status"] not in {"reserved", "not_interested"}
                 ]
                 result = notify_changes(

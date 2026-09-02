@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
@@ -16,12 +17,12 @@ from typing import TypeVar
 from .config import AppConfig
 from .http import BoundedHttpClient, BudgetExhausted, CircuitOpen, HttpFailure
 from .models import (
-    HOUSING_RECORD_SCHEMA_VERSION,
     Classification,
     HousingRecord,
     ListingRef,
     SourceMetrics,
     SourceRunResult,
+    housing_record_schema_is_current,
 )
 from .notify import (
     NotificationResult,
@@ -29,7 +30,7 @@ from .notify import (
     notify_changes,
     sync_latest_report_message,
 )
-from .parsing import normalize_records, oakhouse_snapshot_verified
+from .parsing import normalize_records, oakhouse_snapshot_verified, source_verified_empty
 from .policy import classify
 from .report import PublishedReport, build_report_payload, prune_reports, publish_report
 from .routing import CommuteEnrichmentResult, enrich_commutes
@@ -58,11 +59,66 @@ class DetailResult:
     last_modified: str = ""
     verified_empty: bool = False
     snapshot_verified: bool = True
+    supplemental_network: int = 0
+    supplemental_failures: int = 0
 
 
 def _run_id(prefix: str = "run") -> str:
     now = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     return f"{prefix}-{now}-{uuid.uuid4().hex[:8]}"
+
+
+def _reuse_verified_wagaya_layout(
+    records: tuple[HousingRecord, ...], cached_records: tuple[HousingRecord, ...]
+) -> bool:
+    """Preserve matching Japanese layout evidence across a transient probe failure."""
+
+    cached_by_id = {record.external_id: record for record in cached_records}
+    reused = False
+    for record in records:
+        cached = cached_by_id.get(record.external_id)
+        if cached is None or record.housing_type != "unknown" or cached.housing_type == "unknown":
+            continue
+        japanese_evidence = next(
+            (
+                value
+                for value in cached.source_evidence
+                if value.casefold().startswith("japanese layout:")
+            ),
+            "",
+        )
+        current_layout = record.source_evidence[0] if record.source_evidence else ""
+        cached_layout = cached.source_evidence[0] if cached.source_evidence else ""
+        same_identity = (
+            record.title,
+            record.address,
+            record.rent_yen,
+            current_layout,
+        ) == (
+            cached.title,
+            cached.address,
+            cached.rent_yen,
+            cached_layout,
+        )
+        if not japanese_evidence or not same_identity:
+            continue
+        record.housing_type = cached.housing_type
+        record.private_space = cached.private_space
+        record.source_evidence = (*record.source_evidence, japanese_evidence)
+        reused = True
+    return reused
+
+
+def _wagaya_needs_layout_probe(records: tuple[HousingRecord, ...]) -> bool:
+    """Return whether Wagaya's English layout is a known lossy bedroom translation."""
+
+    return any(
+        record.housing_type == "unknown"
+        and any(
+            re.fullmatch(r"\d+\s*bds", value, re.IGNORECASE) for value in record.source_evidence
+        )
+        for record in records
+    )
 
 
 def _bounded_map(
@@ -121,7 +177,7 @@ def _cache_ttl(ref: ListingRef, cache: CachedPage, config: AppConfig) -> timedel
     }
     if "eligible" in current_classifications:
         return timedelta(hours=4)
-    if "review" in current_classifications:
+    if current_classifications & {"review", "unverified"}:
         return timedelta(hours=12)
     return timedelta(days=7)
 
@@ -129,7 +185,7 @@ def _cache_ttl(ref: ListingRef, cache: CachedPage, config: AppConfig) -> timedel
 def _cache_reusable(ref: ListingRef, cache: CachedPage | None, config: AppConfig) -> bool:
     if cache is None or cache.list_fingerprint != ref.list_fingerprint:
         return False
-    if any(record.schema_version != HOUSING_RECORD_SCHEMA_VERSION for record in cache.records):
+    if any(not housing_record_schema_is_current(record) for record in cache.records):
         return False
     return datetime.now().astimezone() - cache.fetched_at <= _cache_ttl(ref, cache, config)
 
@@ -274,7 +330,7 @@ def _run_source(
         def fetch(ref: ListingRef) -> DetailResult:
             cache = cache_by_id[ref.external_id]
             validators_are_compatible = bool(cache) and all(
-                record.schema_version == HOUSING_RECORD_SCHEMA_VERSION for record in cache.records
+                housing_record_schema_is_current(record) for record in cache.records
             )
             response = adapter.fetch_detail(
                 ref,
@@ -295,6 +351,30 @@ def _run_source(
                     last_modified or cache.last_modified,
                 )
             records = tuple(normalize_records(ref, spec.label, response.text))
+            supplemental_network = 0
+            supplemental_failures = 0
+            if spec.source_id == "wagaya" and _wagaya_needs_layout_probe(records):
+                japanese_ref = replace(ref, url=ref.url.replace("/en/", "/jp/", 1))
+                supplemental_network = 1
+                try:
+                    japanese_response = adapter.fetch_detail(japanese_ref)
+                    if japanese_response.status_code == 200:
+                        records = tuple(
+                            normalize_records(
+                                ref,
+                                spec.label,
+                                response.text,
+                                supplemental_document=japanese_response.text,
+                            )
+                        )
+                    else:
+                        supplemental_failures = 1
+                except (BudgetExhausted, CircuitOpen):
+                    raise
+                except HttpFailure:
+                    supplemental_failures = 1
+                    if cache:
+                        _reuse_verified_wagaya_layout(records, cache.records)
             oakhouse_snapshot_ok = spec.source_id != "oakhouse" or oakhouse_snapshot_verified(
                 response.text, len(records)
             )
@@ -303,8 +383,10 @@ def _run_source(
                 "fresh",
                 etag,
                 last_modified,
-                spec.source_id == "oakhouse" and not records and oakhouse_snapshot_ok,
-                oakhouse_snapshot_ok,
+                verified_empty=source_verified_empty(spec.source_id, response.text),
+                snapshot_verified=oakhouse_snapshot_ok,
+                supplemental_network=supplemental_network,
+                supplemental_failures=supplemental_failures,
             )
 
         processed: set[str] = set()
@@ -335,6 +417,8 @@ def _run_source(
                 if cache:
                     staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 continue
+            metrics.supplemental_detail_network += result.supplemental_network
+            metrics.supplemental_detail_failures += result.supplemental_failures
             if result.status == "missing" or result.verified_empty:
                 verified_pages.add(ref.external_id)
                 closed_pages.add(ref.external_id)
@@ -407,6 +491,7 @@ def _run_source(
             or detail_budget_exhausted
             or metrics.detail_deferred
             or metrics.detail_fetch_failures
+            or metrics.supplemental_detail_failures
         ):
             status = "partial"
             reasons = []
@@ -418,6 +503,10 @@ def _run_source(
                 )
             if metrics.detail_fetch_failures:
                 reasons.append(f"{metrics.detail_fetch_failures} detail fetches failed")
+            if metrics.supplemental_detail_failures:
+                reasons.append(
+                    f"{metrics.supplemental_detail_failures} supplemental detail fetches failed"
+                )
             error = "; ".join(reasons) + "; cached progress will resume automatically"
         if spec.authoritative_disappearance and metrics.parse_failures and status == "healthy":
             status = "partial"
@@ -609,6 +698,12 @@ def run_refresh(
             "retries": sum(result.metrics.retries for result in results),
             "detail_cache_hits": sum(result.metrics.detail_cache_hits for result in results),
             "detail_network": sum(result.metrics.detail_network for result in results),
+            "supplemental_detail_network": sum(
+                result.metrics.supplemental_detail_network for result in results
+            ),
+            "supplemental_detail_failures": sum(
+                result.metrics.supplemental_detail_failures for result in results
+            ),
             "http_failures": sum(result.metrics.http_failures for result in results),
             "circuit_openings": sum(result.metrics.circuit_openings for result in results),
             "detail_not_modified": sum(result.metrics.detail_not_modified for result in results),

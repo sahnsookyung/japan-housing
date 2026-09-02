@@ -12,6 +12,7 @@ target_prefectures = ["Tokyo", "Kanagawa", "Saitama", "Chiba"]
 allowed_housing_types = ["private_room", "1R", "1K"]
 private_space_required = true
 registration_required = true
+strict_evidence = true
 commute_anchors = ["Kichijoji Station", "Shibuya Station", "Shinjuku Station"]
 
 [ranking]

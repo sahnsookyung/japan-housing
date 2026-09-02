@@ -143,7 +143,13 @@ def _candidate(
     stable_key = str(record.get("stable_key") or "")
     price = _number(record.get("ranking_price_yen"))
     location = _perspective_location(record, ranking, perspective_id)
+    price_basis = str(record.get("ranking_price_basis") or "")
     if not stable_key or price is None or price <= 0 or location is None or location < 0:
+        return None
+    # A known-cost floor can rank below a fully priced home only because the
+    # provider omitted mandatory entry/exit amounts. Keep it visible, but do
+    # not let incomplete evidence dominate the Pareto frontier.
+    if "incomplete" in price_basis:
         return None
     track = str(record.get("track") or "both")
     return track, price, location, stable_key

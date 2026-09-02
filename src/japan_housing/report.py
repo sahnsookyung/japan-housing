@@ -49,48 +49,76 @@ def build_report_payload(
     for item in records:
         item["source_status"] = statuses.get(str(item.get("source_id")), "unknown")
         if item.get("freshness") == "stale":
+            stale_evidence = "listing is stale and requires detail-page revalidation"
             cautions = list(item.get("cautions") or ())
-            cautions.append("listing is stale and requires detail-page revalidation")
+            cautions.append(stale_evidence)
             item["cautions"] = list(dict.fromkeys(cautions))
-            if item.get("classification") == "eligible":
-                item["classification"] = "review"
+            if item.get("classification") != "excluded":
+                item["classification"] = (
+                    "unverified" if config.profile.strict_evidence else "review"
+                )
                 rank_key = list(item.get("rank_key") or ())
                 if rank_key:
-                    rank_key[0] = 1
+                    rank_key[0] = 2 if config.profile.strict_evidence else 1
                     item["rank_key"] = rank_key
     records.sort(key=lambda item: tuple(item.get("rank_key") or (999, str(item.get("stable_key")))))
     pareto = annotate_pareto_frontier(records, config.ranking, config.routing)
-    counts = {name: 0 for name in ("eligible", "review", "excluded")}
+    classifications = ("eligible", "review", "unverified", "excluded")
+    counts = {name: 0 for name in classifications}
+    current_counts = {name: 0 for name in classifications}
     tracks = {name: 0 for name in ("landing", "long_term", "both")}
+    current_tracks = {name: 0 for name in ("landing", "long_term", "both")}
+    freshness_counts = {name: 0 for name in ("current", "stale")}
     for item in records:
-        counts[str(item.get("classification"))] = counts.get(str(item.get("classification")), 0) + 1
-        tracks[str(item.get("track"))] = tracks.get(str(item.get("track")), 0) + 1
+        classification = str(item.get("classification"))
+        track = str(item.get("track"))
+        freshness = str(item.get("freshness") or "current")
+        counts[classification] = counts.get(classification, 0) + 1
+        tracks[track] = tracks.get(track, 0) + 1
+        freshness_counts[freshness] = freshness_counts.get(freshness, 0) + 1
+        if freshness == "current":
+            current_counts[classification] = current_counts.get(classification, 0) + 1
+            current_tracks[track] = current_tracks.get(track, 0) + 1
     persisted_statuses = [str(item.get("last_status") or "not_run") for item in health]
     commute_coverage = store.commute_coverage(config.routing)
     routing_complete = (
         not config.routing.enabled
         or commute_coverage["fresh_elements"] == commute_coverage["required_elements"]
     )
+    classification_invariant_ok = not config.profile.strict_evidence or counts.get("review", 0) == 0
     status = (
         "healthy"
         if persisted_statuses
         and all(value == "healthy" for value in persisted_statuses)
         and all(result.status == "healthy" for result in source_results)
         and routing_complete
+        and classification_invariant_ok
         else "partial"
     )
     return {
-        "schema_version": 6,
+        "schema_version": 9,
         "run_id": run_id,
         "generated_at": iso_now(),
         "status": status,
         "housing_count": len(records),
         "classification_counts": counts,
+        "current_classification_counts": current_counts,
         "track_counts": tracks,
+        "current_track_counts": current_tracks,
+        "freshness_counts": freshness_counts,
         "source_health": health,
         "source_coverage": store.source_coverage(),
         "commute_coverage": commute_coverage,
         "performance": performance,
+        "evidence_policy": {
+            "mode": "separate_unverified" if config.profile.strict_evidence else "manual_review",
+            "strict_evidence": config.profile.strict_evidence,
+            "classification_invariant_ok": classification_invariant_ok,
+            "manual_review_count": counts.get("review", 0),
+            "current_manual_review_count": current_counts.get("review", 0),
+            "unverified_count": counts.get("unverified", 0),
+            "current_unverified_count": current_counts.get("unverified", 0),
+        },
         "ranking": {
             "method": "weighted_normalized_price_distance_transit_and_bicycle",
             "direction": "lower_is_better",
@@ -206,7 +234,10 @@ def build_report_payload(
 
 
 def _markdown(payload: dict[str, Any]) -> str:
-    counts = payload["classification_counts"]
+    counts = payload.get("current_classification_counts") or payload["classification_counts"]
+    freshness = payload.get("freshness_counts") or {}
+    current_total = sum(int(value) for value in counts.values())
+    stale_total = int(freshness.get("stale") or 0)
     ranking = payload["ranking"]
     anchor_frontiers = " · ".join(
         f"{perspective['label']} {perspective['frontier_count']}/{perspective['candidate_count']}"
@@ -219,9 +250,12 @@ def _markdown(payload: dict[str, Any]) -> str:
         f"Generated: {payload['generated_at']}",
         f"Status: **{payload['status']}**",
         (
-            f"Listings: **{payload['housing_count']}** · "
-            f"eligible {counts.get('eligible', 0)} · review {counts.get('review', 0)} · "
-            f"excluded {counts.get('excluded', 0)}"
+            f"Listings: **{current_total} current** · "
+            f"eligible {counts.get('eligible', 0)} · "
+            f"unverified {counts.get('unverified', 0)} · "
+            f"review {counts.get('review', 0)} · "
+            f"excluded {counts.get('excluded', 0)} · {stale_total} quarantined/stale · "
+            f"{payload['housing_count']} stored"
         ),
         "",
         (
@@ -273,6 +307,7 @@ def _markdown(payload: dict[str, Any]) -> str:
     for heading, classification in (
         ("Actionable", "eligible"),
         ("Manual review", "review"),
+        ("Unverified / blocked", "unverified"),
         ("Excluded", "excluded"),
     ):
         lines.extend((f"## {heading}", ""))
@@ -280,10 +315,11 @@ def _markdown(payload: dict[str, Any]) -> str:
         if not selected:
             lines.extend(("None.", ""))
             continue
-        if classification == "excluded":
+        if classification in {"unverified", "excluded"}:
+            label = "unverified" if classification == "unverified" else "excluded"
             lines.extend(
                 (
-                    f"{len(selected):,} excluded listings are retained in the JSON and CSV files. ",
+                    f"{len(selected):,} {label} listings are retained in the JSON and CSV files. ",
                     "They are omitted here to keep the Discord attachment bounded.",
                     "",
                 )

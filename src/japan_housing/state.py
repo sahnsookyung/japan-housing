@@ -14,12 +14,14 @@ from typing import Any
 from .config import RankingConfig, RoutingConfig
 from .geography import validate_coordinates
 from .models import (
+    ACTIONABLE_CLASSIFICATIONS,
     AnchorCommute,
     Classification,
     CommuteSummary,
     HousingRecord,
     ListingRef,
     SourceMetrics,
+    expected_housing_record_schema_version,
     iso_now,
 )
 from .routing import (
@@ -298,11 +300,16 @@ class StateStore:
         """Mark non-authoritative inventory stale without treating absence as closure."""
 
         now = datetime.now().astimezone()
-        changed: dict[str, int] = {}
+        before = {
+            str(row["stable_key"]): (str(row["source_id"]), str(row["freshness"]))
+            for row in self.connection.execute(
+                "SELECT stable_key, source_id, freshness FROM records"
+            )
+        }
         with self.connection:
             for spec in specs:
                 if spec.authoritative_disappearance or spec.stale_after_hours is None:
-                    cursor = self.connection.execute(
+                    self.connection.execute(
                         """
                         UPDATE records SET freshness='current'
                         WHERE source_id=? AND active=1 AND freshness!='current'
@@ -311,7 +318,7 @@ class StateStore:
                     )
                 else:
                     cutoff = (now - timedelta(hours=spec.stale_after_hours)).isoformat()
-                    cursor = self.connection.execute(
+                    self.connection.execute(
                         """
                         UPDATE records SET freshness='stale'
                         WHERE source_id=? AND active=1 AND freshness='current'
@@ -319,10 +326,33 @@ class StateStore:
                         """,
                         (spec.source_id, cutoff),
                     )
-                changed[spec.source_id] = max(0, int(cursor.rowcount))
+            outdated: list[tuple[str]] = []
+            for row in self.connection.execute(
+                """
+                SELECT stable_key, source_id, record_json
+                FROM records WHERE active=1 AND freshness='current'
+                """
+            ):
+                try:
+                    schema_version = int(json.loads(row["record_json"]).get("schema_version") or 0)
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    schema_version = 0
+                expected_schema = expected_housing_record_schema_version(str(row["source_id"]))
+                if schema_version != expected_schema:
+                    outdated.append((str(row["stable_key"]),))
+            if outdated:
+                self.connection.executemany(
+                    "UPDATE records SET freshness='stale' WHERE stable_key=?", outdated
+                )
             self.connection.execute(
                 "UPDATE records SET freshness='closed' WHERE active=0 AND freshness!='closed'"
             )
+        changed = {spec.source_id: 0 for spec in specs}
+        for row in self.connection.execute("SELECT stable_key, source_id, freshness FROM records"):
+            stable_key = str(row["stable_key"])
+            if stable_key in before and before[stable_key][1] != str(row["freshness"]):
+                source_id = str(row["source_id"])
+                changed[source_id] = changed.get(source_id, 0) + 1
         return changed
 
     def stale_revalidation_refs(
@@ -345,7 +375,8 @@ class StateStore:
               ON c.source_id=r.source_id AND c.page_external_id=r.page_external_id
             WHERE r.source_id=? AND r.active=1 AND r.freshness='stale'
             ORDER BY CASE r.classification
-                         WHEN 'eligible' THEN 0 WHEN 'review' THEN 1 ELSE 2 END,
+                         WHEN 'eligible' THEN 0 WHEN 'review' THEN 1
+                         WHEN 'unverified' THEN 2 ELSE 3 END,
                      r.last_seen_at, r.page_external_id, r.stable_key
             """,
             (source_id,),
@@ -650,7 +681,7 @@ class StateStore:
 
     @staticmethod
     def _material_improvement(old: sqlite3.Row, new: sqlite3.Row) -> bool:
-        order = {"eligible": 0, "review": 1, "excluded": 2}
+        order = {"eligible": 0, "review": 1, "unverified": 2, "excluded": 3}
         if order[new["classification"]] < order[old["classification"]]:
             return True
         old_record = json.loads(old["record_json"])
@@ -738,7 +769,7 @@ class StateStore:
                             "record": changed_record,
                         }
                     )
-                    if enqueue_changes and row["classification"] != "excluded":
+                    if enqueue_changes and row["classification"] in ACTIONABLE_CLASSIFICATIONS:
                         self._enqueue_notification_change(changes[-1])
             if closed_pages:
                 placeholders = ",".join("?" for _ in closed_pages)
@@ -812,7 +843,8 @@ class StateStore:
         rows = self.connection.execute(
             """
             SELECT record_json FROM records
-            WHERE active=1 AND freshness='current' AND classification!='excluded'
+            WHERE active=1 AND freshness='current'
+              AND classification IN ('eligible', 'review')
             """
         ).fetchall()
         return [HousingRecord.from_dict(json.loads(row["record_json"])) for row in rows]
@@ -1154,6 +1186,12 @@ class StateStore:
                     "stale_records": int(active["stale_records"] or 0),
                     "verified_page_ratio": float(metrics.get("verified_coverage_ratio") or 0.0),
                     "detail_fetch_failures": int(metrics.get("detail_fetch_failures") or 0),
+                    "supplemental_detail_network": int(
+                        metrics.get("supplemental_detail_network") or 0
+                    ),
+                    "supplemental_detail_failures": int(
+                        metrics.get("supplemental_detail_failures") or 0
+                    ),
                     "parse_failures": int(metrics.get("parse_failures") or 0),
                     "detail_deferred": int(metrics.get("detail_deferred") or 0),
                     "stale_revalidation_candidates": int(
@@ -1234,7 +1272,7 @@ class StateStore:
         queued = 0
         with self.connection:
             for change in changes:
-                if change.get("classification") == "excluded":
+                if change.get("classification") not in ACTIONABLE_CLASSIFICATIONS:
                     continue
                 queued += int(self._enqueue_notification_change(change))
         return queued
@@ -1265,6 +1303,7 @@ class StateStore:
               AND n.attempt_count < ?
               AND (n.next_attempt_at IS NULL OR n.next_attempt_at <= ?)
               AND r.active=1 AND r.freshness='current'
+              AND r.classification IN ('eligible', 'review')
               AND r.fingerprint=n.record_fingerprint
             ORDER BY n.reserved_at
             """,

@@ -25,7 +25,7 @@ def test_source_registry_is_fixed_and_uses_bounded_oakhouse_index() -> None:
     assert specs["oakhouse"].authoritative_disappearance
     assert not specs["best_estate"].authoritative_disappearance
     assert not specs["wagaya"].authoritative_disappearance
-    assert specs["wagaya"].detail_budget_per_run == 100
+    assert specs["wagaya"].detail_budget_per_run == 40
 
 
 def test_list_discovery_resumes_across_a_small_page_budget() -> None:

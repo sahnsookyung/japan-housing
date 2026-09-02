@@ -60,6 +60,20 @@ test("review, reserved, rejected, and invalid choices fail closed", () => {
   assert.deepEqual([...housingParetoFrontierIds(records)], ["choice"]);
 });
 
+test("incomplete contract-cost floors are not Pareto candidates", () => {
+  const incomplete = housing("unknown-contract-fees", 40_000, 10, {
+    ranking_price_basis: "long_term_known_cost_floor_incomplete_total",
+  });
+  const complete = housing("fully-priced", 70_000, 40, {
+    ranking_price_basis: "long_term_effective",
+  });
+
+  assert.equal(housingParetoCandidate(incomplete), null);
+  assert.deepEqual([...housingParetoFrontierIds([incomplete, complete])], [
+    "fully-priced",
+  ]);
+});
+
 test("filtered records recompute the frontier", () => {
   const records = [
     housing("dominant", 60_000, 30),

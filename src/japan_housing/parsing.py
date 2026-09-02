@@ -6,12 +6,13 @@ import hashlib
 import html as html_module
 import json
 import re
+from calendar import monthrange
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from .geography import validate_coordinates
 from .html import clean_text, evidence_hash, meta, money, title, visible_text
-from .models import HOUSING_RECORD_SCHEMA_VERSION, HousingRecord, ListingRef, iso_now
+from .models import HousingRecord, ListingRef, expected_housing_record_schema_version, iso_now
 
 PREFECTURES = (
     "Hokkaido",
@@ -62,6 +63,11 @@ PREFECTURES = (
     "Kagoshima",
     "Okinawa",
 )
+PREFECTURE_BY_CASEFOLD = {prefecture.casefold(): prefecture for prefecture in PREFECTURES}
+PREFECTURE_PATTERN = re.compile(
+    rf"(?<![A-Za-z])({'|'.join(map(re.escape, PREFECTURES))})(?![A-Za-z])",
+    re.I,
+)
 
 OAKHOUSE_ROOM_ROW_PATTERN = re.compile(
     r'<tr\s+([^>]*class=["\'][^"\']*\bp-room__caset__row\b[^"\']*["\'][^>]*)>(.*?)</tr>',
@@ -107,6 +113,19 @@ def _label_value(label: str, text: str) -> str:
     return ""
 
 
+def _definition_value(label: str, document: str) -> str | None:
+    """Read one HTML definition-list value while preserving an explicitly empty value."""
+
+    match = re.search(
+        rf"<dt[^>]*>\s*{re.escape(label)}\s*</dt>\s*<dd[^>]*>(.*?)</dd>",
+        document,
+        re.I | re.S,
+    )
+    if not match:
+        return None
+    return clean_text(re.sub(r"<[^>]+>", " ", match.group(1)))
+
+
 def _rent_multiple(value: str, rent_yen: int | None) -> int | None:
     match = re.search(r"([\d.]+)\s*months?\b", value, re.I)
     if not match or rent_yen is None:
@@ -126,6 +145,8 @@ def _label_amount(label: str, text: str, *, rent_yen: int | None = None) -> int 
     value = _label_value(label, text)
     if not value:
         return None
+    if re.fullmatch(r"(?:-|—|none|not required|no)(?:\s*(?:Yen|円))?", value, re.I):
+        return 0
     if re.search(r"(?:¥|￥|\bYen\b|円)", value, re.I):
         return money(value)
     return _rent_multiple(value, rent_yen)
@@ -139,7 +160,21 @@ def _section_after(label: str, text: str) -> str:
 def _explicit_fee(text: str, patterns: tuple[str, ...]) -> int | None:
     amount = r"((?:(?:¥|￥)\s*[\d,]+|[\d,]+\s*(?:Yen|円)))"
     for pattern in patterns:
-        match = re.search(rf"(?:{pattern})\s*[:：]?\s*{amount}", text, re.I)
+        match = re.search(
+            rf"(?:{pattern})\s*[:：]?\s*(?:of\s+)?(?:[（(]\s*)?{amount}",
+            text,
+            re.I,
+        )
+        if match and (value := money(match.group(1))) is not None:
+            return value
+    return None
+
+
+def _plain_labeled_amount(text: str, patterns: tuple[str, ...]) -> int | None:
+    """Parse a provider-labeled integer even when the page omits the currency suffix."""
+
+    for pattern in patterns:
+        match = re.search(rf"(?:{pattern})\s*[:：]?\s*([\d,]+)(?!\s*[%％])", text, re.I)
         if match and (value := money(match.group(1))) is not None:
             return value
     return None
@@ -151,12 +186,15 @@ def _monthly_detail_fees(text: str) -> int:
     fees: dict[str, int] = {}
     pattern = re.compile(
         r"([A-Za-z][A-Za-z /-]{1,48}?fee)\s*[:：]?\s*"
-        r"(?:¥|￥)?\s*([\d,]+)\s*(?:Yen|円)?\s*\(monthly\)",
+        r"(?:¥|￥)?\s*([\d,]+)\s*(?:Yen|円)?\s*(?:\(monthly\)|per month)",
         re.I,
     )
     for label, raw_amount in pattern.findall(text):
         normalized = " ".join(label.casefold().split())
-        if any(word in normalized for word in ("rent", "maintenance", "guarantee")):
+        tokens = set(normalized.replace("/", " ").split())
+        if normalized in {"rent fee", "maintenance fee", "management fee"} or (
+            "guarantee" in tokens
+        ):
             continue
         amount = money(raw_amount)
         if amount is not None:
@@ -165,28 +203,50 @@ def _monthly_detail_fees(text: str) -> int:
 
 
 def _date(value: str) -> str | None:
+    normalized = re.sub(r"^[\s:：]+", "", value)
     for pattern in (
         r"(20\d{2})[./年-](\d{1,2})[./月-](\d{1,2})",
         r"(20\d{2})/(\d{1,2})/(\d{1,2})",
     ):
-        match = re.search(pattern, value)
+        match = re.search(pattern, normalized)
         if not match:
             continue
         try:
             return date(*(int(part) for part in match.groups())).isoformat()
         except ValueError:
             continue
+    approximate = re.search(
+        r"(20\d{2})[./-](\d{1,2})\s*-?\s*(Early|Mid(?:-term|dle)?|Late)",
+        normalized,
+        re.I,
+    )
+    if approximate:
+        year, month = (int(part) for part in approximate.groups()[:2])
+        period = approximate.group(3).casefold()
+        day = (
+            10
+            if period == "early"
+            else 20
+            if period.startswith("mid")
+            else monthrange(year, month)[1]
+        )
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            return None
+    month_only = re.fullmatch(r"\s*(20\d{2})[./-](\d{1,2})\s*", normalized)
+    if month_only:
+        year, month = (int(part) for part in month_only.groups())
+        try:
+            return date(year, month, monthrange(year, month)[1]).isoformat()
+        except ValueError:
+            return None
     return None
 
 
 def _prefecture(value: str) -> str:
-    lowered = value.casefold()
-    matches = (
-        (lowered.find(prefecture.casefold()), prefecture)
-        for prefecture in PREFECTURES
-        if prefecture.casefold() in lowered
-    )
-    return min(matches, default=(-1, ""))[1]
+    match = PREFECTURE_PATTERN.search(value)
+    return PREFECTURE_BY_CASEFOLD.get(match.group(1).casefold(), "") if match else ""
 
 
 def _availability_confidence(value: str) -> str:
@@ -299,11 +359,122 @@ def _housing_type(value: str) -> str:
     folded = value.casefold()
     if "share house" in folded or "sharehouse" in folded or "single room" in folded:
         return "private_room"
-    if re.search(r"\b1k\b", folded):
-        return "1K"
-    if re.search(r"\b1r\b", folded):
+    if re.search(r"\b(?:1\s*)?studio\b", folded):
         return "1R"
+    layout = re.search(r"(?<![a-z0-9])(\d+(?:ldk|dk|k|r))(?![a-z0-9])", folded)
+    if layout:
+        return layout.group(1).upper()
     return "unknown"
+
+
+def _wagaya_japanese_layout(document: str) -> str:
+    match = re.search(
+        r"<dt[^>]*>\s*間取り\s*</dt>\s*<dd[^>]*>(.*?)</dd>",
+        document,
+        re.I | re.S,
+    )
+    if match:
+        return clean_text(re.sub(r"<[^>]+>", " ", match.group(1)))
+    return _label_value("間取り", visible_text(document))
+
+
+def _city_from_address(address: str, prefecture: str) -> str:
+    without_prefecture = re.sub(
+        rf"\b{re.escape(prefecture)}\s+Prefecture\b", "", address, flags=re.I
+    )
+    if without_prefecture == address:
+        without_prefecture = re.sub(
+            rf"^\s*{re.escape(prefecture)}\b", "", address, count=1, flags=re.I
+        )
+    for pattern in (
+        r"\b([A-Za-z][A-Za-z -]+? City(?: [A-Za-z-]+ Ward)?)\b",
+        r"\b([A-Za-z][A-Za-z -]+?-(?:ku|shi|cho|machi))\b",
+    ):
+        match = re.search(pattern, without_prefecture, re.I)
+        if match:
+            city = clean_text(match.group(1))
+            if city.casefold().endswith(" city"):
+                prior = without_prefecture[: match.start()]
+                ward = re.search(
+                    r"([A-Za-z][A-Za-z -]+ Ward|[A-Za-z][A-Za-z -]+-ku)\s*,?\s*$", prior, re.I
+                )
+                if ward:
+                    city = f"{city} {clean_text(ward.group(1))}"
+            return city
+    segments = [
+        clean_text(segment) for segment in without_prefecture.split(",") if clean_text(segment)
+    ]
+    if not segments:
+        return ""
+    return next((segment for segment in segments if not re.match(r"^\d", segment)), segments[0])
+
+
+def _rent_percentage(text: str, rent_yen: int | None, patterns: tuple[str, ...]) -> int | None:
+    if rent_yen is None:
+        return None
+    for pattern in patterns:
+        match = re.search(rf"(?:{pattern})[^\n。]{{0,50}}?([\d.]+)\s*[%％]", text, re.I)
+        if not match:
+            continue
+        try:
+            ratio = Decimal(match.group(1)) / 100
+        except InvalidOperation:
+            continue
+        if 0 <= ratio <= 5:
+            return int((ratio * rent_yen).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return None
+
+
+def _rent_months(text: str, rent_yen: int | None, patterns: tuple[str, ...]) -> int | None:
+    if rent_yen is None:
+        return None
+    for pattern in patterns:
+        match = re.search(
+            rf"(?:{pattern})[^\n。]{{0,30}}?([\d.]+)\s*(?:ヶ|ヵ|か|ケ|カ)?月(?:分)?",
+            text,
+            re.I,
+        )
+        if not match:
+            continue
+        try:
+            months = Decimal(match.group(1))
+        except InvalidOperation:
+            continue
+        if 0 <= months <= 24:
+            return int((months * rent_yen).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return None
+
+
+def _best_estate_monthly_fees(text: str, recurring_base_yen: int | None) -> int:
+    """Return the explicit monthly lower bound for mandatory Best-Estate add-ons."""
+
+    exact_guarantee = _rent_percentage(
+        text,
+        recurring_base_yen,
+        (
+            r"保証委託料[^\n。]{0,80}?月額",
+            r"保証会社加入要[^\n。]{0,80}?月次(?:月額総額)?",
+        ),
+    )
+    guarantee = exact_guarantee
+    if guarantee is None:
+        guarantee = _explicit_fee(
+            text,
+            (r"monthly guarantee fee", r"月額保証(?:委託)?料"),
+        )
+    smart_lock = _explicit_fee(text, (r"スマートロック利用料",))
+    return (guarantee or 0) + (smart_lock or 0)
+
+
+def _best_estate_other_initial_fees(text: str) -> int:
+    """Sum distinct mandatory entry services with exact provider labels."""
+
+    labels = (
+        (r"エアコン(?:分解)?(?:清掃|洗浄)(?:費用?|代)?",),
+        (r"(?:24|２４)\s*[HＨ](?:時間)?緊急サポート(?:費用?|代)?",),
+        (r"抗菌(?:施工|処理)(?:費用?|代)?",),
+    )
+    return sum(_plain_labeled_amount(text, patterns) or 0 for patterns in labels)
 
 
 def _cluster(address: str, property_name: str, unit: str, rent: int | None) -> str:
@@ -323,7 +494,7 @@ def _record(
     **values: object,
 ) -> HousingRecord:
     record = HousingRecord(
-        schema_version=HOUSING_RECORD_SCHEMA_VERSION,
+        schema_version=expected_housing_record_schema_version(ref.source_id),
         source_id=ref.source_id,
         source_label=label,
         external_id=external_id or ref.external_id,
@@ -445,9 +616,20 @@ def oakhouse_verified_empty(document: str) -> bool:
     return oakhouse_snapshot_verified(document, 0)
 
 
+def source_verified_empty(source_id: str, document: str) -> bool:
+    """Recognize only provider-explicit closure evidence for a detail page."""
+
+    if source_id == "oakhouse":
+        return oakhouse_verified_empty(document)
+    if source_id == "wagaya":
+        return bool(re.search(r"\bthe\s+post\s+has\s+been\s+removed\b", document, re.I))
+    return False
+
+
 def _best_estate_costs(
     text: str,
     rent_yen: int | None,
+    recurring_base_yen: int | None,
 ) -> tuple[int | None, int | None, tuple[str, ...], str]:
     """Return known one-time entry/exit costs without guessing variable charges."""
 
@@ -468,15 +650,50 @@ def _best_estate_costs(
     )
     home_insurance = _label_value("Home Insurance", text)
     insurance_amount = money(home_insurance) if home_insurance else None
-    guarantee_amount = _explicit_fee(
+    guarantee_amount = _rent_percentage(
         text,
-        (r"initial guarantee fee", r"initial guarantor fee"),
+        recurring_base_yen,
+        (
+            r"保証委託料[^\n。]{0,80}?初回額",
+            r"保証会社加入要[^\n。]{0,80}?初回(?:月額総額)?",
+        ),
     )
+    if guarantee_amount is None:
+        guarantee_amount = _explicit_fee(
+            text,
+            (
+                r"initial guarantee fee",
+                r"initial guarantor fee",
+                r"minimum guarantee fee",
+            ),
+        )
+    brokerage_fee = next(
+        (
+            amount
+            for label in ("Brokerage Fee", "Broker Fee", "Agent Fee")
+            if (amount := _label_amount(label, text, rent_yen=rent_yen)) is not None
+        ),
+        None,
+    )
+    if brokerage_fee is None:
+        brokerage_fee = _rent_percentage(
+            text,
+            rent_yen,
+            (r"仲介手数料(?:家賃(?:の)?)?", r"brokerage fee", r"broker fee", r"agent fee"),
+        )
+    if brokerage_fee is None:
+        brokerage_fee = _rent_months(
+            text,
+            rent_yen,
+            (r"仲介手数料(?:家賃(?:の)?)?", r"brokerage fee", r"broker fee", r"agent fee"),
+        )
+    other_initial = _best_estate_other_initial_fees(text)
     exit_cost = _explicit_fee(
         text,
         (
             r"退去時(?:清掃|クリーニング)費用?",
             r"move[- ]?out (?:cleaning )?fee",
+            r"cleaning fee (?:upon|at) move[- ]?out",
             r"exit cleaning fee",
         ),
     )
@@ -487,6 +704,8 @@ def _best_estate_costs(
         move_in_admin,
         insurance_amount,
         guarantee_amount,
+        brokerage_fee,
+        other_initial or None,
     ]
     has_initial_evidence = explicit_initial is not None or any(
         value is not None for value in known_components
@@ -518,6 +737,13 @@ def _best_estate_costs(
             and insurance_amount is None
         ):
             unknown.append("home insurance amount")
+        brokerage_text = bool(
+            re.search(r"仲介手数料|\b(?:brokerage|broker|agent) fee\b", text, re.I)
+        )
+        if brokerage_text and brokerage_fee is None:
+            unknown.append("brokerage fee")
+        if re.search(r"スマモル賃貸プラン未加入の場合", text):
+            unknown.append("variable smart-lock service fees")
         if unknown:
             unknown.append("complete initial cost")
     if exit_cost is None:
@@ -556,6 +782,7 @@ def _wagaya_costs(
     if agent_fee is None:
         agent_fee = _label_amount("Agent Fee", text, rent_yen=rent)
     standalone_initial = _label_amount("Initial costs", text, rent_yen=rent)
+    key_replacement_fee = _explicit_fee(text, (r"key replacement fee",))
 
     breakdown_initial = sum(value for value in (deposit, key_money, agent_fee) if value is not None)
     estimate_initial = None
@@ -564,20 +791,70 @@ def _wagaya_costs(
     elif estimate_total is not None:
         estimate_initial = estimate_total
     included_initial = max(breakdown_initial, estimate_initial or 0)
-    if standalone_initial is not None:
-        expected_with_standalone = (
-            (rent or 0) + (management or 0) + breakdown_initial + standalone_initial
+    additional_initial = sum(
+        value for value in (standalone_initial, key_replacement_fee) if value is not None
+    )
+    if additional_initial:
+        expected_with_additional = (
+            (rent or 0) + (management or 0) + breakdown_initial + additional_initial
         )
-        if estimate_total is None or estimate_total < expected_with_standalone:
-            included_initial += standalone_initial
+        if estimate_total is None or estimate_total < expected_with_additional:
+            included_initial += additional_initial
+
+    recurring_before_guarantee = (
+        rent + management + monthly_fees if rent is not None and management is not None else None
+    )
+    monthly_guarantee = _rent_percentage(
+        text,
+        recurring_before_guarantee,
+        (r"monthly\s+guarantee\s+(?:commission\s+)?fee",),
+    )
+    if monthly_guarantee is None:
+        monthly_guarantee = _explicit_fee(text, (r"monthly\s+guarantee\s+fee",))
+    monthly_fees += monthly_guarantee or 0
 
     insurance_value = _label_value("Renter's Insurance", text)
-    insurance_amount = money(insurance_value) if insurance_value else None
-    guarantee_value = _label_value("Initial Guarantee Fee", text)
-    guarantee_amount = money(guarantee_value) if guarantee_value else None
-    included_initial += sum(
-        value for value in (insurance_amount, guarantee_amount) if value is not None
+    insurance_amount = (
+        money(insurance_value)
+        if insurance_value and re.search(r"(?:¥|￥|\bYen\b|円)", insurance_value, re.I)
+        else None
     )
+    guarantee_value = _label_value("Initial Guarantee Fee", text)
+    guarantee_amount = (
+        money(guarantee_value)
+        if guarantee_value and re.search(r"(?:¥|￥|\bYen\b|円)", guarantee_value, re.I)
+        else _rent_percentage(
+            f"Initial Guarantee Fee {guarantee_value}",
+            recurring_before_guarantee,
+            (r"initial\s+guarantee\s+fee",),
+        )
+    )
+    if guarantee_amount is None:
+        guarantee_amount = _explicit_fee(text, (r"initial\s+guarantee\s+fee",))
+    tenant_support_fee = _label_amount("Tenant support fee", text)
+    room_cleaning_fee = _label_amount("Room cleaning fee", text)
+    key_set_fee = _explicit_fee(text, (r"key set fee",))
+    extra_contract_fees = tuple(
+        value
+        for value in (
+            insurance_amount,
+            guarantee_amount,
+            tenant_support_fee,
+            room_cleaning_fee,
+            key_set_fee,
+        )
+        if value is not None
+    )
+    if extra_contract_fees:
+        expected_with_contract_fees = (
+            (rent or 0)
+            + (management or 0)
+            + breakdown_initial
+            + additional_initial
+            + sum(extra_contract_fees)
+        )
+        if estimate_total is None or estimate_total < expected_with_contract_fees:
+            included_initial += sum(extra_contract_fees)
     has_initial_evidence = any(
         value is not None
         for value in (
@@ -586,6 +863,7 @@ def _wagaya_costs(
             key_money,
             agent_fee,
             standalone_initial,
+            key_replacement_fee,
             insurance_amount,
             guarantee_amount,
         )
@@ -597,6 +875,7 @@ def _wagaya_costs(
         (
             r"退去時(?:清掃|クリーニング)費用?",
             r"move[- ]?out (?:cleaning )?fee",
+            r"cleaning fee (?:upon|at) move[- ]?out",
             r"exit cleaning fee",
         ),
     )
@@ -611,12 +890,25 @@ def _wagaya_costs(
         and insurance_amount is None
     ):
         unknown.extend(("renter's insurance amount", "complete initial cost"))
-    if (
-        guarantee_value
-        and not re.search(r"^(?:-|none|not required)$", guarantee_value, re.I)
-        and guarantee_amount is None
+    guarantee_description = _label_value("Guarantor Fee description", text) or _label_value(
+        "Guarantor", text
+    )
+    guarantee_required = bool(
+        re.search(
+            r"(?:required|condition of the contract|obligation to join)",
+            guarantee_description,
+            re.I,
+        )
+    )
+    if guarantee_amount is None and (
+        (guarantee_value and not re.search(r"^(?:-|none|not required)$", guarantee_value, re.I))
+        or guarantee_required
     ):
         unknown.extend(("initial guarantee fee", "complete initial cost"))
+    if re.search(r"\bguarantee deposit\s*:\s*required\b", text, re.I):
+        unknown.extend(("guarantee deposit amount", "complete initial cost"))
+    if re.search(r"\binternet usage fee\s*:\s*(?:required|mandatory)\b", text, re.I):
+        unknown.append("internet usage fee amount")
     if exit_cost is None:
         unknown.append("exit cost")
 
@@ -659,8 +951,10 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
         if isinstance(structured_rent, int | float) and 0 <= structured_rent <= 100_000_000
         else money(meta(document, "x-property-rent")) or _amount_after("Rent", text)
     )
-    management = _amount_after("Maintenance Fee", text)
-    recurring = rent + management if rent is not None and management is not None else None
+    management = _label_amount("Maintenance Fee", text)
+    recurring_base = rent + management if rent is not None and management is not None else None
+    mandatory_monthly = _best_estate_monthly_fees(text, recurring_base)
+    recurring = recurring_base + mandatory_monthly if recurring_base is not None else None
     address_parts = tuple(
         str(address_data.get(name) or "")
         for name in ("addressRegion", "addressLocality", "streetAddress")
@@ -679,9 +973,13 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
     unknown: list[str] = []
     if management is None:
         unknown.append("management fee")
-    initial, exit_cost, cost_unknown, price_validation = _best_estate_costs(text, rent)
+    initial, exit_cost, cost_unknown, price_validation = _best_estate_costs(
+        text, rent, recurring_base
+    )
     unknown.extend(cost_unknown)
     monthly = bool(re.search(r"\bMonthly Apartment\b", text, re.I))
+    provider_updated_at = _date(_label_value("Last updated", text)) or ""
+    provider_next_update_at = _date(_label_value("Next update date", text)) or ""
     latitude, longitude, coordinate_basis = _coordinates(ref, document, prefecture)
     return [
         _record(
@@ -704,7 +1002,7 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
             furnished=bool(re.search(r"Furnished|With Appliances", text, re.I)) or None,
             rent_yen=rent,
             management_fee_yen=management,
-            mandatory_monthly_fees_yen=0,
+            mandatory_monthly_fees_yen=mandatory_monthly,
             recurring_total_yen=recurring,
             price_basis="detail_components",
             price_validation=price_validation,
@@ -718,11 +1016,15 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
             minimum_stay_days=30 if monthly else None,
             foreigner_evidence=("Best-Estate foreign-resident inventory",),
             overseas_application_evidence=("Provider supports applications from overseas",),
-            registration_evidence=("Residential listing; confirm registration with GTN",),
-            registration_confidence="probable",
+            registration_evidence=(
+                "Best-Estate foreign-renter guidance requires residence registration",
+            ),
+            registration_confidence="confirmed" if not monthly else "unknown",
             guarantor_evidence=("GTN guarantee support available",),
             occupancy_restrictions=_restrictions(text),
             source_evidence=tuple(filter(None, (layout, available_text))),
+            provider_updated_at=provider_updated_at,
+            provider_next_update_at=provider_next_update_at,
         )
     ]
 
@@ -732,6 +1034,14 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
     if "property details" not in text.casefold() and "apartment infomation" not in text.casefold():
         return []
     page_title = title(document).split(" | wagaya", 1)[0]
+    detail_text = _section_after("Property Details", text) or _section_after(
+        "Apartment Infomation", text
+    )
+
+    def detail_value(field: str) -> str:
+        structured = _definition_value(field, document)
+        return structured if structured is not None else _label_value(field, detail_text)
+
     (
         rent,
         management,
@@ -746,19 +1056,35 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
         if rent is not None and management is not None
         else None
     )
-    available_text = _first((r"(?:Available from|Current Status)\s*([^\n]+)",), text)
-    layout = _first((r"Layout\s*([^\n]+)",), text)
-    address = _first((r"Location\s*([^\n]+)", r"^([^\n]+?-(?:ku|shi)[^\n]*)"), text)
+    available_date_text = detail_value("Available from")
+    current_status = detail_value("Current Status")
+    available_text = (
+        available_date_text
+        if available_date_text
+        and not re.fullmatch(r"(?:-|none|please ask|need to confirm)", available_date_text, re.I)
+        else current_status
+    )
+    source_availability_status = {
+        "vacant": "vacancy",
+        "moving in": "occupied",
+        "will be vacated": "soon",
+    }.get(current_status.casefold(), "unknown")
+    layout = detail_value("Layout")
+    title_address = page_title.split(" - ", 1)[1] if " - " in page_title else ""
+    title_address = re.sub(r"\s*\[[^\]]+\]\s*$", "", title_address)
+    address = _label_value("Location", detail_text) or title_address
     prefecture = _prefecture(page_title + " " + address + " " + text[:2500])
-    guarantee = _first((r"(?:Guarantor Fee description|Guarantor)\s*([^\n]+)",), text)
-    housing_type = _housing_type(layout + " " + text[:2000])
+    city = _city_from_address(address, prefecture)
+    guarantee = detail_value("Guarantor Fee description") or detail_value("Guarantor")
+    property_type = detail_value("Type")
+    explicit_share_house = bool(
+        re.search(r"\b(?:share house|shared apartment)\b", f"{page_title} {property_type}", re.I)
+    )
+    housing_type = "private_room" if explicit_share_house else _housing_type(layout)
     unknown: list[str] = []
     if management is None:
         unknown.append("management fee")
     unknown.extend(cost_unknown)
-    detail_text = _section_after("Property Details", text) or _section_after(
-        "Apartment Infomation", text
-    )
     monthly = bool(
         re.search(r"\bMonthly Rental\b", page_title, re.I)
         or re.search(r"\bMonthly Rental\b(?!\s+Property)", detail_text, re.I)
@@ -773,7 +1099,7 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
             property_name=page_title.split(" - ", 1)[0],
             address=address,
             prefecture=prefecture,
-            city=_first((r"Location\s*([^\n,]+)",), text),
+            city=city,
             latitude=latitude,
             longitude=longitude,
             coordinate_basis=coordinate_basis,
@@ -786,7 +1112,12 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
                 else None
             ),
             housing_type=housing_type,
-            private_space=True if housing_type != "unknown" else None,
+            private_space=(
+                True
+                if housing_type != "unknown"
+                or re.search(r"\b(?:apartment|mansion|detached house)\b", property_type, re.I)
+                else None
+            ),
             furnished=bool(re.search(r"Fully furnished|Furniture", text, re.I)) or None,
             rent_yen=rent,
             management_fee_yen=management,
@@ -800,6 +1131,7 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
             available_from=_date(available_text),
             available_text=available_text,
             availability_confidence=_availability_confidence(available_text),
+            source_availability_status=source_availability_status,
             contract_type="monthly" if monthly else "standard",
             minimum_stay_days=30 if monthly else None,
             foreigner_evidence=("wagaya foreign-resident listing",),
@@ -808,13 +1140,37 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
                 if "currently residing in japan" in text.casefold()
                 else ()
             ),
-            registration_evidence=("Confirm address registration with the listed agent",),
-            registration_confidence="unknown",
+            registration_evidence=(
+                ("Standard residential rental rather than monthly lodging",)
+                if not monthly
+                else ("Confirm address registration with the listed agent",)
+            ),
+            registration_confidence="standard_residential" if not monthly else "unknown",
             guarantor_evidence=(guarantee,) if guarantee else (),
             occupancy_restrictions=_restrictions(text),
             source_evidence=tuple(filter(None, (layout, available_text, guarantee))),
         )
     ]
+
+
+def _oakhouse_access(text: str) -> tuple[tuple[str, ...], int | None]:
+    """Extract station names only from explicit property-access evidence."""
+
+    matches = re.findall(
+        r"\b(\d+)\s*(?:min|minutes?)\s+walk\s+(?:to|from)\s+"
+        r"([^\n]{1,80}?(?:Station|Sta\.))\b",
+        text,
+        re.I,
+    )
+    stations: list[str] = []
+    walks: list[int] = []
+    for walk_text, station_text in matches:
+        station = re.sub(r"(?<!\s)(Station|Sta\.)$", r" \1", station_text.strip(), flags=re.I)
+        station = re.sub(r"\s+", " ", station)
+        if station not in stations:
+            stations.append(station)
+        walks.append(int(walk_text))
+    return tuple(stations[:3]), min(walks) if walks else None
 
 
 def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
@@ -823,7 +1179,7 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
     page_title = full_title.split(" | ", 1)[0]
     prefecture = _prefecture(full_title) or _prefecture(text[:2500])
     city = _first((rf"{prefecture}\s+([^|\n]+)",), full_title)
-    stations = tuple(dict.fromkeys(re.findall(r"([^\n]{1,60}?(?:Station|Sta\.))", text, re.I)))[:3]
+    stations, walk_minutes = _oakhouse_access(text)
     latitude, longitude, coordinate_basis = _coordinates(ref, document, prefecture)
     records: list[HousingRecord] = []
     for attr, body, row_start in _oakhouse_room_rows(document):
@@ -876,11 +1232,7 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
                 longitude=longitude,
                 coordinate_basis=coordinate_basis,
                 nearest_stations=stations,
-                walk_minutes_min=(
-                    int(walk.group(1))
-                    if (walk := re.search(r"(\d+)\s*(?:min|minutes?)", text, re.I))
-                    else None
-                ),
+                walk_minutes_min=walk_minutes,
                 housing_type=housing_type,
                 private_space=True if room_type in {"single", "apartment"} else None,
                 furnished="Furnished" in room_text or attr.get("data-furniture") == "0",
@@ -924,11 +1276,36 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
     return records
 
 
-def normalize_records(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
+def normalize_records(
+    ref: ListingRef,
+    label: str,
+    document: str,
+    *,
+    supplemental_document: str | None = None,
+) -> list[HousingRecord]:
+    # Wagaya's explicit removal marker is otherwise indistinguishable from a
+    # valid detail-page shell. Oakhouse verifies empty inventory against its
+    # room-table invariants inside the runner, so avoid parsing that table twice.
+    if ref.source_id == "wagaya" and source_verified_empty(ref.source_id, document):
+        return []
     if ref.source_id == "best_estate":
         return _best_estate(ref, label, document)
     if ref.source_id == "wagaya":
-        return _wagaya(ref, label, document)
+        records = _wagaya(ref, label, document)
+        if supplemental_document:
+            japanese_layout = _wagaya_japanese_layout(supplemental_document)
+            housing_type = _housing_type(japanese_layout)
+            if housing_type != "unknown":
+                for record in records:
+                    if record.housing_type != "unknown":
+                        continue
+                    record.housing_type = housing_type
+                    record.private_space = True
+                    record.source_evidence = (
+                        *record.source_evidence,
+                        f"Japanese layout: {japanese_layout}",
+                    )
+        return records
     if ref.source_id == "oakhouse":
         return _oakhouse(ref, label, document)
     raise ValueError(f"unsupported source parser: {ref.source_id}")

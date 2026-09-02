@@ -199,6 +199,67 @@ def test_transactional_notification_outbox_preserves_overflow(
         assert len(store.pending_notifications()) == 5
 
 
+def test_unverified_records_are_not_routed_or_delivered(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((_spec(),))
+        store.begin_source_run("blocked", "fixture")
+        record = replace(
+            _record(),
+            registration_evidence=(),
+            registration_confidence="unknown",
+        )
+        outcome = classify(record, app_config.profile, app_config.ranking)
+        assert outcome.name == "unverified"
+        store.stage("blocked", "page-1", record, outcome)
+        store.promote("blocked", _spec(), enqueue_changes=True)
+
+        assert store.routing_candidates() == []
+        assert store.pending_notifications() == []
+        assert (
+            store.enqueue_notification_changes(
+                [
+                    {
+                        "type": "digest",
+                        "stable_key": record.stable_key,
+                        "fingerprint": record.fingerprint(),
+                        "classification": "unverified",
+                        "record": record.to_dict(),
+                    }
+                ]
+            )
+            == 0
+        )
+
+
+def test_queued_change_is_suppressed_if_record_becomes_unverified(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((_spec(),))
+        record = _record()
+        store.begin_source_run("actionable", "fixture")
+        store.stage(
+            "actionable",
+            "page-1",
+            record,
+            classify(record, app_config.profile, app_config.ranking),
+        )
+        store.promote("actionable", _spec(), enqueue_changes=True)
+        assert len(store.pending_notifications()) == 1
+        assert len(store.routing_candidates()) == 1
+
+        with store.connection:
+            store.connection.execute(
+                "UPDATE records SET classification='unverified' WHERE stable_key=?",
+                (record.stable_key,),
+            )
+
+        assert store.pending_notifications() == []
+        assert store.routing_candidates() == []
+
+
 def test_abandoned_notification_reservation_fails_closed(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
@@ -257,6 +318,69 @@ def test_non_authoritative_records_become_stale_then_revalidate_or_close(
         assert store.active_records() == []
 
 
+def test_outdated_record_schema_is_quarantined_even_for_authoritative_source(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((_spec(),))
+        _promote(store, app_config, "initial")
+        row = store.connection.execute("SELECT stable_key, record_json FROM records").fetchone()
+        payload = json.loads(row["record_json"])
+        payload["schema_version"] = HOUSING_RECORD_SCHEMA_VERSION - 1
+        with store.connection:
+            store.connection.execute(
+                "UPDATE records SET record_json=?, freshness='current' WHERE stable_key=?",
+                (json.dumps(payload), row["stable_key"]),
+            )
+
+        store.apply_listing_freshness((_spec(),))
+
+        assert store.active_records()[0]["freshness"] == "stale"
+        assert store.routing_candidates() == []
+
+
+def test_report_separates_current_decisions_from_quarantined_inventory(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_sources((_spec(),))
+        first = _record()
+        second = replace(first, external_id="unit-2", title="Second unit")
+        store.begin_source_run("initial", "fixture")
+        for page_id, record in (("page-1", first), ("page-2", second)):
+            store.stage(
+                "initial",
+                page_id,
+                record,
+                classify(record, app_config.profile, app_config.ranking),
+            )
+        store.promote("initial", _spec(), complete=True)
+        with store.connection:
+            store.connection.execute(
+                "UPDATE records SET freshness='stale' WHERE stable_key=?",
+                (first.stable_key,),
+            )
+
+        payload = build_report_payload(store, "report", [], {"offline": True}, app_config)
+
+    assert payload["classification_counts"] == {
+        "eligible": 1,
+        "review": 0,
+        "unverified": 1,
+        "excluded": 0,
+    }
+    assert payload["current_classification_counts"] == {
+        "eligible": 1,
+        "review": 0,
+        "unverified": 0,
+        "excluded": 0,
+    }
+    assert payload["freshness_counts"] == {"current": 1, "stale": 1}
+    stale = next(item for item in payload["housing"] if item["freshness"] == "stale")
+    assert stale["classification"] == "unverified"
+    assert "listing is stale" in " ".join(stale["cautions"])
+
+
 def test_never_fetched_details_are_ordered_before_stale_cache(tmp_path: Path) -> None:
     first = ListingRef("fixture", "1", "https://source.example/detail/1", "one")
     second = ListingRef("fixture", "2", "https://source.example/detail/2", "two")
@@ -290,7 +414,16 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     assert "priority_score" in csv_text.splitlines()[0]
     assert "pareto_location_score" in csv_text.splitlines()[0]
     assert "pareto_location_scores" in csv_text.splitlines()[0]
-    assert latest["schema_version"] == 6
+    assert latest["schema_version"] == 9
+    assert latest["evidence_policy"] == {
+        "mode": "separate_unverified",
+        "strict_evidence": True,
+        "classification_invariant_ok": True,
+        "manual_review_count": 0,
+        "current_manual_review_count": 0,
+        "unverified_count": 0,
+        "current_unverified_count": 0,
+    }
     assert latest["ranking"]["pareto"]["complexity"] == "O(p * n log n), p <= 4"
     assert latest["ranking"]["pareto"]["candidate_count"] == 1
     assert [perspective["id"] for perspective in latest["ranking"]["pareto"]["perspectives"]] == [
@@ -399,6 +532,8 @@ def test_persisted_partial_source_keeps_offline_report_partial(
             SourceMetrics(
                 discovered=2,
                 detail_fetch_failures=2,
+                supplemental_detail_network=3,
+                supplemental_detail_failures=1,
                 stale_revalidation_candidates=4,
                 stale_revalidated=1,
             ),
@@ -410,6 +545,8 @@ def test_persisted_partial_source_keeps_offline_report_partial(
     assert payload["source_coverage"][0]["status"] == "partial"
     assert payload["source_coverage"][0]["verified_page_ratio"] == 0.0
     assert payload["source_coverage"][0]["detail_fetch_failures"] == 2
+    assert payload["source_coverage"][0]["supplemental_detail_network"] == 3
+    assert payload["source_coverage"][0]["supplemental_detail_failures"] == 1
     assert payload["source_coverage"][0]["stale_revalidation_candidates"] == 4
     assert payload["source_coverage"][0]["stale_revalidated"] == 1
 

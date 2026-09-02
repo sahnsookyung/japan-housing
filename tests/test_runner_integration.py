@@ -84,6 +84,55 @@ def test_bounded_map_stops_scheduling_after_circuit_open() -> None:
     assert isinstance(results[-1][1], CircuitOpen)
 
 
+def test_wagaya_layout_probe_failure_reuses_only_matching_verified_evidence() -> None:
+    current = HousingRecord(
+        schema_version=14,
+        source_id="wagaya",
+        source_label="wagaya Japan",
+        external_id="1",
+        url="https://wagaya-japan.com/en/chintai_detail.php?id=1",
+        title="Room 1",
+        address="Tokyo Suginami-ku",
+        rent_yen=60_000,
+        housing_type="unknown",
+        private_space=True,
+        source_evidence=("1bds", "Immediately"),
+    )
+    cached = replace(
+        current,
+        schema_version=13,
+        housing_type="1K",
+        source_evidence=("1bds", "Immediately", "Japanese layout: 1K"),
+    )
+
+    assert runner._reuse_verified_wagaya_layout((current,), (cached,))
+    assert current.housing_type == "1K"
+    assert current.source_evidence[-1] == "Japanese layout: 1K"
+
+    changed = replace(current, housing_type="unknown", rent_yen=61_000)
+    assert not runner._reuse_verified_wagaya_layout((changed,), (cached,))
+    assert changed.housing_type == "unknown"
+
+
+def test_wagaya_layout_probe_is_limited_to_lossy_bedroom_translations() -> None:
+    lossy = HousingRecord(
+        schema_version=14,
+        source_id="wagaya",
+        source_label="wagaya Japan",
+        external_id="1",
+        url="https://wagaya-japan.com/en/chintai_detail.php?id=1",
+        title="Room 1",
+        housing_type="unknown",
+        source_evidence=("2bds", "Immediately"),
+    )
+    unsupported = replace(lossy, external_id="2", source_evidence=("Other", "Immediately"))
+    already_known = replace(lossy, external_id="3", housing_type="2LDK")
+
+    assert runner._wagaya_needs_layout_probe((lossy,))
+    assert not runner._wagaya_needs_layout_probe((unsupported,))
+    assert not runner._wagaya_needs_layout_probe((already_known,))
+
+
 def _cached_record(schema_version: int = HOUSING_RECORD_SCHEMA_VERSION) -> HousingRecord:
     return HousingRecord(
         schema_version=schema_version,
@@ -264,6 +313,82 @@ def test_stale_revalidation_cannot_be_starved_by_current_backlog(
     assert fetched == ["stale-page"]
     assert result.metrics.stale_revalidation_candidates == 1
     assert result.metrics.stale_revalidated == 1
+
+
+def test_wagaya_explicit_removed_post_closes_cached_record(
+    app_config: AppConfig,
+    tmp_path: Path,
+) -> None:
+    runtime = replace(
+        app_config.runtime,
+        state_path=tmp_path / "state.sqlite3",
+        artifacts_path=tmp_path / "artifacts",
+        per_host_workers=1,
+        max_queued_tasks=1,
+    )
+    config = replace(app_config, runtime=runtime)
+    spec = SourceSpec(
+        "wagaya",
+        "wagaya Japan",
+        ("https://wagaya-japan.com/en/rent/tokyo/list/",),
+        frozenset({"wagaya-japan.com"}),
+        (r"/en/chintai_detail\.php\?id=\d+$",),
+    )
+    ref = ListingRef(
+        "wagaya",
+        "removed",
+        "https://wagaya-japan.com/en/chintai_detail.php?id=2",
+        "fingerprint",
+    )
+    record = replace(
+        _cached_record(),
+        source_id="wagaya",
+        source_label="wagaya Japan",
+        external_id="removed",
+        url=ref.url,
+    )
+    classification = runner.classify(record, config.profile, config.ranking)
+
+    class RemovedAdapter:
+        def __init__(self) -> None:
+            self.spec = spec
+
+        def discover(self, cursor: str | None, budget: int) -> DiscoveryBatch:
+            return DiscoveryBatch((ref,), None, 1, True)
+
+        def fetch_detail(
+            self,
+            item: ListingRef,
+            *,
+            etag: str = "",
+            last_modified: str = "",
+        ) -> HttpResponse:
+            document = """
+                <html><head><title>Old room | wagaya Japan</title></head><body>
+                <h1>Old room Property Details</h1>
+                <p>The post has been removed</p>
+                </body></html>
+            """
+            return HttpResponse(item.url, 200, document, len(document), {})
+
+    with runner.StateStore(runtime.state_path) as store:
+        store.ensure_sources((spec,))
+        store.begin_source_run("seed", spec.source_id)
+        store.stage("seed", ref.external_id, record, classification)
+        store.promote("seed", spec)
+
+        result = runner._run_source(
+            RemovedAdapter(),
+            store,
+            config,
+            "refresh",
+            _FixtureClient(config),
+        )
+        active = store.active_records()
+
+    assert result.status == "healthy"
+    assert result.metrics.explicit_closed == 1
+    assert active == []
 
 
 def test_full_refresh_promotes_records_and_publishes_report(

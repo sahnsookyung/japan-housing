@@ -71,7 +71,7 @@ main { width: min(1500px, calc(100% - 32px)); margin: 20px auto 64px; }
 .notice { margin-bottom: 14px; padding: 11px 15px; color: #69450a; background: var(--amber-pale); border-left: 4px solid var(--frontier); border-radius: 5px 10px 10px 5px; font-size: 12px; }
 .notice strong { margin-right: 4px; }
 
-.summary-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.summary-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .summary-card { min-height: 84px; gap: 12px; padding: 13px 15px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 12px; text-align: left; box-shadow: 0 6px 20px rgba(23,49,38,.045); }
 button.summary-card:hover, button.summary-card:focus-visible { border-color: var(--green); box-shadow: 0 8px 24px rgba(18,107,75,.12); }
 .summary-card.static { cursor: default; }
@@ -80,6 +80,7 @@ button.summary-card:hover, button.summary-card:focus-visible { border-color: var
 .summary-card small { margin-top: 4px; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
 .summary-icon { width: 36px; height: 36px; display: grid; flex: 0 0 auto; place-items: center; color: var(--green-dark); background: var(--green-pale); border-radius: 10px; font-weight: 900; }
 .summary-icon.warning { color: var(--amber); background: var(--amber-pale); }
+.summary-icon.blocked { color: var(--blue); background: #e5f0fb; }
 .summary-icon.frontier { color: #6b4500; background: #ffedbf; }
 .summary-icon.route { color: var(--blue); background: #e5f0fb; }
 
@@ -126,6 +127,7 @@ tbody tr.is-frontier { background: #fffaf0; box-shadow: inset 3px 0 var(--fronti
 .badge { display: inline-flex; width: max-content; padding: 2px 6px; color: var(--muted); background: var(--soft); border-radius: 5px; font-size: 9px; font-weight: 820; letter-spacing: .035em; text-transform: uppercase; }
 .badge-eligible { color: var(--green-dark); background: var(--green-pale); }
 .badge-review { color: var(--amber); background: var(--amber-pale); }
+.badge-unverified { color: var(--blue); background: #e5f0fb; }
 .badge-excluded { color: var(--red); background: var(--red-pale); }
 .badge-frontier { color: #6b4500; background: #ffedbf; }
 .caution { color: var(--amber) !important; }

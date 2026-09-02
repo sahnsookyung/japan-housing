@@ -53,7 +53,11 @@
         </button>
         <button id="summary-review-card" class="summary-card" type="button">
           <span class="summary-icon warning" aria-hidden="true">!</span>
-          <span><strong id="summary-review">—</strong><small>Manual review</small></span>
+          <span><strong id="summary-review">—</strong><small>Current manual review</small></span>
+        </button>
+        <button id="summary-unverified-card" class="summary-card" type="button">
+          <span class="summary-icon blocked" aria-hidden="true">?</span>
+          <span><strong id="summary-unverified">—</strong><small>Unverified / blocked</small></span>
         </button>
         <button id="summary-pareto-card" class="summary-card" type="button">
           <span class="summary-icon frontier" aria-hidden="true">◇</span>
@@ -82,11 +86,13 @@
           </label>
           <label class="field">Classification
             <select id="classification">
-              <option value="actionable">Eligible + review</option>
-              <option value="eligible">Eligible</option>
-              <option value="review">Manual review</option>
-              <option value="excluded">Excluded</option>
-              <option value="all">All</option>
+              <option value="actionable">Eligible + review (current)</option>
+              <option value="eligible">Eligible (current)</option>
+              <option value="review">Manual review (current)</option>
+              <option value="unverified">Unverified / blocked (current)</option>
+              <option value="excluded">Excluded (current)</option>
+              <option value="stale">Quarantined / stale</option>
+              <option value="all">All stored inventory</option>
             </select>
           </label>
           <label class="field">Track

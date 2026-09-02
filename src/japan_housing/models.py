@@ -8,9 +8,21 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
-ClassificationName = Literal["eligible", "review", "excluded"]
+ClassificationName = Literal["eligible", "review", "unverified", "excluded"]
+ACTIONABLE_CLASSIFICATIONS = frozenset({"eligible", "review"})
 SourceStatus = Literal["healthy", "partial", "failed", "drifted"]
-HOUSING_RECORD_SCHEMA_VERSION = 5
+HOUSING_RECORD_SCHEMA_VERSION = 12
+SOURCE_RECORD_SCHEMA_VERSIONS = {
+    "best_estate": 13,
+    "oakhouse": 11,
+    "wagaya": 14,
+}
+
+
+def expected_housing_record_schema_version(source_id: str) -> int:
+    """Return the parser schema for a source without invalidating unrelated caches."""
+
+    return SOURCE_RECORD_SCHEMA_VERSIONS.get(source_id, HOUSING_RECORD_SCHEMA_VERSION)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +84,8 @@ class HousingRecord:
     occupancy_restrictions: tuple[str, ...] = ()
     source_evidence: tuple[str, ...] = ()
     list_fingerprint: str = ""
+    provider_updated_at: str = ""
+    provider_next_update_at: str = ""
     observed_at: str = ""
     detail_verified_at: str = ""
     raw_evidence_hash: str = ""
@@ -107,6 +121,10 @@ class HousingRecord:
     @property
     def stable_key(self) -> str:
         return f"{self.source_id}:{self.external_id}"
+
+
+def housing_record_schema_is_current(record: HousingRecord) -> bool:
+    return record.schema_version == expected_housing_record_schema_version(record.source_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +201,8 @@ class SourceMetrics:
     discovered: int = 0
     detail_candidates: int = 0
     detail_network: int = 0
+    supplemental_detail_network: int = 0
+    supplemental_detail_failures: int = 0
     detail_cache_hits: int = 0
     parsed: int = 0
     parse_failures: int = 0

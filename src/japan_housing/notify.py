@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 
 from .envfile import env_value
+from .models import ACTIONABLE_CLASSIFICATIONS
 from .state import StateStore
 
 DISCORD_HOSTS = frozenset(
@@ -129,7 +130,7 @@ def notify_changes(
     queueable = [
         item
         for item in changes
-        if item.get("classification") != "excluded"
+        if item.get("classification") in ACTIONABLE_CLASSIFICATIONS
         and (
             not isinstance(item.get("record"), dict)
             or item["record"].get("freshness", "current") == "current"
@@ -202,6 +203,10 @@ def notify_changes(
 def _report_content(payload: dict[str, object]) -> str:
     counts = payload.get("classification_counts")
     counts = counts if isinstance(counts, dict) else {}
+    current_counts = payload.get("current_classification_counts")
+    current_counts = current_counts if isinstance(current_counts, dict) else counts
+    freshness = payload.get("freshness_counts")
+    freshness = freshness if isinstance(freshness, dict) else {}
     health = payload.get("source_health")
     health = health if isinstance(health, list) else []
     statuses = [item.get("last_status") for item in health if isinstance(item, dict)]
@@ -220,8 +225,11 @@ def _report_content(payload: dict[str, object]) -> str:
         "📌 **Latest Japan Housing Report**",
         f"Updated: {updated} · status: **{report_status}**",
         (
-            f"**{int(payload.get('housing_count') or 0):,} listings** · "
-            f"{int(counts.get('eligible') or 0)} eligible · {int(counts.get('review') or 0)} review"
+            f"**{sum(int(value or 0) for value in current_counts.values()):,} current listings** · "
+            f"{int(current_counts.get('eligible') or 0)} eligible · "
+            f"{int(current_counts.get('unverified') or 0)} unverified · "
+            f"{int(current_counts.get('review') or 0)} review · "
+            f"{int(freshness.get('stale') or 0):,} quarantined"
         ),
         (
             f"Sources: {statuses.count('healthy')} healthy · {partial} partial · "
@@ -252,7 +260,7 @@ def _report_content(payload: dict[str, object]) -> str:
         item
         for item in housing
         if isinstance(item, dict)
-        and item.get("classification") != "excluded"
+        and item.get("classification") in ACTIONABLE_CLASSIFICATIONS
         and item.get("decision_status") not in {"reserved", "not_interested"}
     ]
     selected = []

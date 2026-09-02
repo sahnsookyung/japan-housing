@@ -313,7 +313,7 @@ def source_specs() -> tuple[SourceSpec, ...]:
             frozenset({"wagaya-japan.com", "www.wagaya-japan.com"}),
             (r"https://(?:www\.)?wagaya-japan\.com/en/chintai_detail\.php\?id=\d+(?:&[^#]*)?$",),
             interval_hours=12,
-            detail_budget_per_run=100,
+            detail_budget_per_run=40,
             stale_revalidation_budget=25,
         ),
     )

@@ -27,6 +27,7 @@ class SearchProfile:
     private_space_required: bool
     registration_required: bool
     commute_anchors: tuple[str, ...]
+    strict_evidence: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +126,9 @@ def load_config(path: Path) -> AppConfig:
     runtime_data = payload.get("runtime") or {}
     ranking_data = payload.get("ranking") or {}
     routing_data = payload.get("routing") or {}
+    strict_evidence = profile_data.get("strict_evidence", False)
+    if not isinstance(strict_evidence, bool):
+        raise ValueError("strict_evidence must be a boolean")
     try:
         profile = SearchProfile(
             move_in_earliest=date.fromisoformat(str(profile_data["move_in_earliest"])),
@@ -143,6 +147,7 @@ def load_config(path: Path) -> AppConfig:
             private_space_required=bool(profile_data["private_space_required"]),
             registration_required=bool(profile_data["registration_required"]),
             commute_anchors=tuple(str(value) for value in profile_data.get("commute_anchors", ())),
+            strict_evidence=strict_evidence,
         )
     except KeyError as exc:
         raise ValueError(f"missing profile configuration: {exc.args[0]}") from exc

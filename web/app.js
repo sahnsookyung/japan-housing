@@ -415,30 +415,47 @@ function renderFallbacks() {
 function renderSourceHealth() {
   const container = document.querySelector("#source-health");
   container.replaceChildren();
+  const coverageBySource = new Map(
+    (state.report?.source_coverage || []).map((item) => [item.source_id, item]),
+  );
   for (const item of state.report?.source_health || []) {
     const status = item.last_status || "not run";
+    const coverage = coverageBySource.get(item.source_id) || {};
+    const current = Number(coverage.current_records || 0);
+    const stale = Number(coverage.stale_records || 0);
     const card = node("article", { className: "source-card" });
     card.append(node("span", { className: `status-dot status-${status}`, ariaLabel: status }));
     card.append(node("strong", { text: item.label || item.source_id }));
-    card.append(node("small", { text: status.replaceAll("_", " ") }));
+    card.append(node("small", {
+      text: `${status.replaceAll("_", " ")} · ${current} current · ${stale} quarantined`,
+    }));
     container.append(card);
   }
 }
 
 function renderSummary() {
-  const counts = state.report?.classification_counts || {};
+  const counts = state.report?.current_classification_counts
+    || state.report?.classification_counts
+    || {};
+  const freshness = state.report?.freshness_counts || {};
+  const currentTotal = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+  const staleTotal = Number(freshness.stale || 0);
   const coverage = Math.round((state.report?.commute_coverage?.coverage_ratio || 0) * 100);
   document.querySelector("#summary-eligible").textContent = counts.eligible || 0;
   document.querySelector("#summary-review").textContent = counts.review || 0;
+  document.querySelector("#summary-unverified").textContent = counts.unverified || 0;
   const pareto = state.report?.ranking?.pareto || {};
   document.querySelector("#summary-pareto").textContent =
     pareto.frontier_counts?.[paretoPerspectiveId()] ?? pareto.frontier_count ?? 0;
   document.querySelector("#summary-coverage").textContent = `${coverage}%`;
   document.querySelector("#anchor-label").textContent = anchorLabel();
   document.querySelector("#summary").textContent =
-    `${state.report.housing_count} listings · ${state.report.status} snapshot · updated ${state.report.generated_at}`;
+    `${currentTotal} current · ${staleTotal} quarantined · ${state.report.housing_count} stored · ${state.report.status} snapshot · updated ${state.report.generated_at}`;
+  const evidenceLabel = state.report?.evidence_policy?.mode === "separate_unverified"
+    ? " · evidence separated"
+    : "";
   document.querySelector("#refresh-state").textContent =
-    `${state.report.status} · ${coverage}% routes`;
+    `${state.report.status} · ${coverage}% routes${evidenceLabel}`;
 }
 
 function showError(message) {
@@ -588,6 +605,11 @@ document.querySelector("#summary-eligible-card").addEventListener("click", () =>
 });
 document.querySelector("#summary-review-card").addEventListener("click", () => {
   controls.classification.value = "review";
+  controls.rankingView.value = "balanced";
+  loadListings(0);
+});
+document.querySelector("#summary-unverified-card").addEventListener("click", () => {
+  controls.classification.value = "unverified";
   controls.rankingView.value = "balanced";
   loadListings(0);
 });

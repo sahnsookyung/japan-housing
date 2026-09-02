@@ -8,8 +8,13 @@ housing. It keeps two ranked tracks for one working-holiday resident:
 - a lower-cost long-term private room or 1R/1K comparison.
 
 The configured recurring-cost ceiling is **¥80,000**, including every known mandatory monthly fee.
-Unknown charges are never treated as zero. Listings with ambiguous registration, availability,
-foreigner acceptance, or total cost stay in manual review.
+Unknown charges are never treated as zero. Listings with unresolved hard requirements such as
+registration, foreigner acceptance, or private-space evidence remain visible as `unverified` under
+the configured `strict_evidence` policy. A strict search retains but excludes listings that cannot
+prove availability for the move-in window. Incomplete one-time costs remain prominent cautions;
+they do not undo an otherwise verified recurring-budget decision, but they make the cost scenario
+incomplete and bar the listing from Pareto comparison. Turning strict evidence off maps unresolved
+hard requirements to the diagnostic manual-review tier.
 
 Within each eligibility, registration, and cost-evidence tier, priority is a lower-is-better score:
 
@@ -29,8 +34,8 @@ Pareto-frontier views. The default frontier minimizes effective monthly price ag
 location-burden axis built from midpoint distance plus mean transit/bus and bicycle time across all
 three commute anchors. The dashboard can switch to an independent Kichijoji, Shibuya, or Shinjuku
 frontier; each anchor view uses distance and route times to that station only. Only eligible,
-still-actionable homes compete, and landing and long-term tracks remain separate so one contract
-type cannot hide useful choices in another.
+still-actionable homes with complete cost scenarios compete, and landing and long-term tracks
+remain separate so one contract type cannot hide useful choices in another.
 
 Distance is calculated from provider-published coordinates to the arithmetic geographic centroid
 of Kichijoji, Shibuya, and Shinjuku stations (`35.6840741, 139.6604630`). Actual public-transit
@@ -87,18 +92,25 @@ The automated registry uses public, robots-permitted entry points only:
   each available room is normalized independently. The index keeps discovery below the global
   response cap while retaining the complete directly managed inventory. Property-level "from"
   prices are comparison evidence only: eligibility and the ¥80,000 ceiling use the actual vacant
-  room's rent plus mandatory maintenance fee. A room-price mismatch or unverified component stays
-  in manual review. Rooms already vacant before 15 September qualify without a ranking penalty;
+  room's rent plus mandatory maintenance fee. A room-price mismatch or unverified component is
+  retained as unverified. Rooms already vacant before 15 September qualify without a ranking penalty;
   only vacancy-soon dates after 28 September are excluded.
 - **Best-Estate.jp** — foreign-resident inventory from public Greater Tokyo under-¥80k and
-  share-house pages. Fixed deposit, key-money, move-in administration, insurance, and move-out
-  cleaning amounts are normalized when the detail page states them. Percentage or ranged guarantor
-  charges stay unknown, so those listings cannot enter the actionable Pareto frontier. The site's
-  robots-disallowed `/api` routes are never used.
+  share-house pages. Fixed deposit, key-money, move-in administration, brokerage, insurance,
+  provider-labeled entry services, mandatory monthly guarantee/smart-lock floors, and move-out
+  cleaning amounts are normalized when the detail page states them. Percentage or ranged charges
+  remain explicitly incomplete, so those listings cannot enter the actionable Pareto frontier.
+  Standard rentals use Best-Estate's foreign-renter residence-registration guidance. Listings are
+  retained but excluded when the page's own promised next-update date is more than 14 days overdue.
+  The site's robots-disallowed `/api` routes are never used.
 - **wagaya Japan** — public Greater Tokyo standard, share-house, and monthly listing pages.
   Its initial-cost calculator is decomposed so first-month rent is not counted twice; mandatory
-  monthly detail fees and distinct one-time fees are added separately. Approximate estimates,
-  required insurance without a price, and undisclosed exit costs remain review evidence.
+  monthly detail fees, percentage guarantee fees, and distinct contract/support/cleaning fees are
+  added separately. When the English page collapses a Japanese layout into `1bds`/`2bds`/`3bds`,
+  the adapter reads the same listing's Japanese definition field and records that evidence rather
+  than guessing. `Vacant`, occupied, and move-out-soon statuses are normalized independently from
+  the translated date. Approximate estimates, required insurance without a price, and undisclosed
+  exit costs remain labeled incomplete evidence and cannot enter the Pareto frontier.
   Detail refreshes advance in resumable batches of at most 100 to avoid triggering the portal's
   request protection during large initial crawls.
 
@@ -125,8 +137,8 @@ crawl and requires two complete misses before closing a room.
 - Conditional `ETag` and `Last-Modified` requests avoid downloading unchanged details. SQLite
   stages all records from a detail page in one transaction.
 - Oakhouse detail and vacancy evidence refreshes every four hours. On the other portals, eligible
-  cache entries refresh every four hours, review entries every twelve hours, and excluded entries
-  every seven days. Refresh tiers are recomputed from the current profile rather than trusting the
+  cache entries refresh every four hours, review and unverified entries every twelve hours, and
+  excluded entries every seven days. Refresh tiers are recomputed from the current profile rather than trusting the
   classification saved at the previous fetch. A changed list fingerprint always forces detail
   verification.
 - An Oakhouse page is considered explicitly empty only when recognized room rows are all unavailable,
@@ -137,7 +149,9 @@ crawl and requires two complete misses before closing a room.
   two complete misses, preserving protection against transient index drift.
 - Partial sources may add verified records but cannot close old ones. Failed or drifted sources keep
   the last healthy snapshot. Partial sources retry after one hour. Detail work prioritizes
-  never-fetched pages, then oldest successful pages, while failed pages use bounded backoff.
+  never-fetched pages, then oldest successful pages, while failed pages use bounded backoff. Wagaya
+  detail work is capped at 40 pages per run so the recurring job makes progress without overwhelming
+  the provider.
 - Non-authoritative portal records not re-seen for 72 hours become `stale` instead of remaining
   silently current. A bounded oldest-first sweep revalidates up to 50 Best-Estate pages and 25
   wagaya pages per source run. Verified pages return to `current`; an explicit 404 or recognized
@@ -145,9 +159,15 @@ crawl and requires two complete misses before closing a room.
   ranked on a Pareto frontier, or notified.
 - A host circuit opening stops new detail work for that host while already-started requests drain.
   Transport failures and parser failures are counted separately, so parser-drift alarms are not
-  inflated by network outages.
+  inflated by network outages. Lossy-layout supplemental requests and failures are reported
+  separately. Japanese layout probes are limited to Wagaya's known lossy `1bds`/`2bds`/`3bds`
+  translations; a failed probe reuses prior Japanese layout evidence only when the listing identity
+  and English layout still match, otherwise it retains the English record without inventing a layout
+  or discarding the page.
 - Every report checks the policy/configuration hash and transactionally reclassifies stale active
-  records before sorting. Source coverage and latency/error/cache metrics are included in JSON.
+  records before sorting. Strict-evidence reports expose and enforce that caution-only records are
+  separated as unverified rather than manual review or excluded; a regression marks the report
+  partial. Source coverage and latency/error/cache metrics are included in JSON.
 - Public-transit and bicycle matrices are deduplicated by property coordinates, bounded by an
   element budget, cached in SQLite for seven days, and refreshed without placing the API key in a
   URL, log, report, or state row. Active records are reclassified before route candidates are
@@ -203,7 +223,7 @@ uv run japan-housing bootstrap --notify
 ```
 
 Pin that report message manually if desired. Later notified runs edit it and send new, reactivated,
-or materially improved non-excluded listings once. Changes enter a durable SQLite outbox in the
+or materially improved actionable (`eligible` or `review`) listings once. Changes enter a durable SQLite outbox in the
 same transaction that promotes their records, so a per-run Discord limit or process restart cannot
 drop overflow. A network timeout becomes `delivery_unknown`
 and is not retried automatically because Discord webhooks provide no idempotency key.

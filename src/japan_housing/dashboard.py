@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import AppConfig
+from .models import ACTIONABLE_CLASSIFICATIONS
 from .pareto import BALANCED_PERSPECTIVE_ID, is_pareto_candidate, pareto_frontier_keys
 from .report import load_latest
 from .state import StateStore
@@ -218,7 +219,15 @@ def dashboard_listing_page(
     """Filter, recompute Pareto membership, and paginate one dashboard request."""
 
     classification = _parameter(parameters, "classification", "actionable")
-    if classification not in {"actionable", "eligible", "review", "excluded", "all"}:
+    if classification not in {
+        "actionable",
+        "eligible",
+        "review",
+        "unverified",
+        "excluded",
+        "stale",
+        "all",
+    }:
         raise ValueError("classification is unsupported")
     track = _parameter(parameters, "track", "all")
     if track not in {"all", "landing", "long_term", "both"}:
@@ -263,10 +272,20 @@ def dashboard_listing_page(
         if not isinstance(item, dict):
             continue
         item_classification = str(item.get("classification") or "")
-        if classification == "actionable" and item_classification == "excluded":
-            continue
-        if classification not in {"actionable", "all"} and item_classification != classification:
-            continue
+        freshness = str(item.get("freshness") or "current")
+        if classification == "stale":
+            if freshness != "stale":
+                continue
+        elif classification != "all":
+            if freshness != "current":
+                continue
+            if (
+                classification == "actionable"
+                and item_classification not in ACTIONABLE_CLASSIFICATIONS
+            ):
+                continue
+            if classification != "actionable" and item_classification != classification:
+                continue
         if track != "all" and item.get("track") != track:
             continue
         if decision != "all" and item.get("decision_status") != decision:

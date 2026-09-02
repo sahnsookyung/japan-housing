@@ -76,6 +76,12 @@ def test_report_message_shows_partial_sources_and_diverse_properties() -> None:
         "status": "partial",
         "housing_count": len(housing),
         "classification_counts": {"eligible": len(housing), "review": 0},
+        "current_classification_counts": {
+            "eligible": len(housing),
+            "review": 0,
+            "unverified": 2,
+        },
+        "freshness_counts": {"current": len(housing), "stale": 12},
         "ranking": {"anchor_label": "Three-station midpoint"},
         "source_health": [
             {"last_status": "healthy"},
@@ -87,6 +93,8 @@ def test_report_message_shows_partial_sources_and_diverse_properties() -> None:
     content = _report_content(payload)
 
     assert "1 healthy · 1 partial" in content
+    assert "12 quarantined" in content
+    assert "2 unverified" in content
     assert content.count("Repeated") == 0
     assert "Room 0" in content
     assert "Room 1" not in content

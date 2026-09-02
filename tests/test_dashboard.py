@@ -34,12 +34,16 @@ def _listing(key: str, classification: str, price: int, location: float) -> dict
 
 
 def test_dashboard_listing_api_filters_recomputes_frontier_and_paginates(app_config) -> None:
+    stale = _listing("stale", "review", 45_000, 15)
+    stale["freshness"] = "stale"
     payload = {
         "housing": [
             _listing("cheap", "eligible", 50_000, 80),
             _listing("close", "eligible", 70_000, 20),
             _listing("review", "review", 55_000, 30),
+            _listing("unverified", "unverified", 52_000, 25),
             _listing("excluded", "excluded", 40_000, 10),
+            stale,
         ]
     }
 
@@ -86,6 +90,21 @@ def test_dashboard_listing_api_filters_recomputes_frontier_and_paginates(app_con
     assert first["records"][0]["stable_key"] == "cheap"
     assert second["records"][0]["stable_key"] == "close"
     assert "raw_evidence_hash" not in first["records"][0]
+
+    quarantined = dashboard_listing_page(
+        payload,
+        {"classification": ["stale"]},
+        app_config,
+    )
+    assert [item["stable_key"] for item in quarantined["records"]] == ["stale"]
+
+    blocked = dashboard_listing_page(
+        payload,
+        {"classification": ["unverified"]},
+        app_config,
+    )
+    assert [item["stable_key"] for item in blocked["records"]] == ["unverified"]
+    assert blocked["pareto_records"] == []
 
 
 def test_dashboard_listing_api_rejects_unbounded_page_size(app_config) -> None:
