@@ -9,28 +9,11 @@ from datetime import date, timedelta
 from math import asin, cos, radians, sin, sqrt
 
 from .config import RankingConfig, RoutingConfig, SearchProfile
-from .models import Classification, CommuteSummary, CostScenario, HousingRecord
+from .costs import cost_scenario
+from .models import Classification, CommuteSummary, HousingRecord
 
-POLICY_VERSION = 9
+POLICY_VERSION = 10
 PROVIDER_UPDATE_GRACE_DAYS = 14
-
-
-def cost_scenario(record: HousingRecord, months: int) -> CostScenario:
-    unknown = list(record.unknown_costs)
-    if record.recurring_total_yen is None:
-        unknown.append("recurring total")
-        return CostScenario(months, None, None, False, tuple(dict.fromkeys(unknown)))
-    total = record.recurring_total_yen * months
-    if record.initial_cost_yen is None:
-        unknown.append("initial cost")
-    else:
-        total += record.initial_cost_yen
-    if record.exit_cost_yen is None:
-        unknown.append("exit cost")
-    else:
-        total += record.exit_cost_yen
-    unknown = list(dict.fromkeys(unknown))
-    return CostScenario(months, total, round(total / months), not unknown, tuple(unknown))
 
 
 def _availability(record: HousingRecord) -> date | None:

@@ -1,221 +1,61 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
-    <title>japan-housing</title>
-    <link rel="stylesheet" href="/styles.css">
-    <script type="module" src="/app.js"></script>
-  </head>
-  <body>
-    <a class="skip-link" href="#results-panel">Skip to housing results</a>
-
-    <header class="topbar">
-      <div class="brand-block">
-        <div class="brand-mark" aria-hidden="true">JH</div>
-        <div>
-          <p class="eyebrow">HOUSING DECISION DESK</p>
-          <h1>japan-housing</h1>
-        </div>
-      </div>
-      <div class="topbar-actions">
-        <p id="refresh-state" class="refresh-state" aria-live="polite">Loading latest report…</p>
-        <button id="refresh" class="icon-button" type="button" aria-label="Reload report" title="Reload report">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
-        </button>
-      </div>
-    </header>
-
-    <main>
-      <section class="hero" aria-labelledby="hero-heading">
-        <div>
-          <p class="eyebrow">GREATER TOKYO · 15–28 SEPTEMBER 2026</p>
-          <h2 id="hero-heading">Choose the practical trade-off.</h2>
-          <p id="summary">Loading the latest verified snapshot…</p>
-        </div>
-        <div class="anchor-card">
-          <span>COMMUTE CENTER</span>
-          <strong id="anchor-label">Kichijoji / Shibuya / Shinjuku midpoint</strong>
-          <small>Transit, bus, bicycle, and straight-line evidence</small>
-        </div>
-      </section>
-
-      <section class="notice" aria-label="Important reminder">
-        <strong>Verify before paying.</strong>
-        Confirm address registration, actual available-room fees, availability, and working-holiday eligibility with the provider. Bicycle routes are estimates and require a safety check.
-      </section>
-
-      <section class="summary-strip" aria-label="Housing report summary">
-        <button id="summary-eligible-card" class="summary-card" type="button">
-          <span class="summary-icon" aria-hidden="true">✓</span>
-          <span><strong id="summary-eligible">—</strong><small>Eligible now</small></span>
-        </button>
-        <button id="summary-review-card" class="summary-card" type="button">
-          <span class="summary-icon warning" aria-hidden="true">!</span>
-          <span><strong id="summary-review">—</strong><small>Current manual review</small></span>
-        </button>
-        <button id="summary-unverified-card" class="summary-card" type="button">
-          <span class="summary-icon blocked" aria-hidden="true">?</span>
-          <span><strong id="summary-unverified">—</strong><small>Unverified / blocked</small></span>
-        </button>
-        <button id="summary-pareto-card" class="summary-card" type="button">
-          <span class="summary-icon frontier" aria-hidden="true">◇</span>
-          <span><strong id="summary-pareto">—</strong><small>Efficient choices</small></span>
-        </button>
-        <article class="summary-card static">
-          <span class="summary-icon route" aria-hidden="true">↗</span>
-          <span><strong id="summary-coverage">—</strong><small>Route coverage</small></span>
-        </article>
-      </section>
-
-      <section class="filter-panel" aria-labelledby="filter-heading">
-        <div class="filter-heading-row">
-          <div>
-            <p class="eyebrow">SHORTLIST CONTROLS</p>
-            <h2 id="filter-heading">Find the right room</h2>
-          </div>
-          <button id="reset" class="text-button" type="button">Reset filters</button>
-        </div>
-        <div class="filters">
-          <label class="field field-search">Search
-            <span class="input-shell">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-              <input id="query" type="search" placeholder="Area, station, or property" aria-keyshortcuts="/">
-            </span>
-          </label>
-          <label class="field">Classification
-            <select id="classification">
-              <option value="actionable">Eligible + review (current)</option>
-              <option value="eligible">Eligible (current)</option>
-              <option value="review">Manual review (current)</option>
-              <option value="unverified">Unverified / blocked (current)</option>
-              <option value="excluded">Excluded (current)</option>
-              <option value="stale">Quarantined / stale</option>
-              <option value="all">All stored inventory</option>
-            </select>
-          </label>
-          <label class="field">Track
-            <select id="track">
-              <option value="all">Landing + long-term</option>
-              <option value="landing">Landing</option>
-              <option value="long_term">Long-term</option>
-              <option value="both">Both / unknown</option>
-            </select>
-          </label>
-          <label class="field">Decision
-            <select id="decision">
-              <option value="all">All decisions</option>
-              <option value="new">New</option>
-              <option value="shortlisted">Shortlisted</option>
-              <option value="contacted">Contacted</option>
-              <option value="application_started">Application started</option>
-              <option value="reserved">Reserved</option>
-              <option value="not_interested">Not interested</option>
-            </select>
-          </label>
-          <label class="field">Maximum recurring cost
-            <input id="max-cost" type="number" min="0" step="5000" value="80000">
-          </label>
-          <label class="field">Priority view
-            <select id="ranking-view">
-              <option value="balanced">Balanced</option>
-              <option value="closer">Closer</option>
-              <option value="cheaper">Cheaper</option>
-              <option value="pareto">Pareto frontier</option>
-            </select>
-          </label>
-        </div>
-        <p id="pareto-explainer" class="pareto-explainer">
-          Efficient choices minimize effective monthly price and normalized location burden. Use the Pareto panel to compare the balanced three-anchor view or an individual Kichijoji, Shibuya, or Shinjuku commute; missing routes retain their configured penalties.
-        </p>
-      </section>
-
-      <section class="workspace" aria-label="Housing results and Pareto chart">
-        <section id="results-panel" class="results-panel" aria-labelledby="results-heading">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">RANKED RESULTS</p>
-              <h2 id="results-heading"><span id="result-count">0</span> homes</h2>
-            </div>
-            <span id="frontier-feedback" class="panel-note" aria-live="polite"></span>
-          </div>
-          <div id="error" class="error" role="alert" hidden></div>
-          <div class="table-scroll" tabindex="0">
-            <table>
-              <thead>
-                <tr>
-                  <th class="compare-heading" scope="col"><span aria-hidden="true">+</span><span class="sr-only">Add to comparison</span></th>
-                  <th scope="col">Property</th>
-                  <th scope="col">Monthly</th>
-                  <th scope="col">Location</th>
-                  <th scope="col">Availability</th>
-                  <th scope="col">Decision</th>
-                </tr>
-              </thead>
-              <tbody id="results"></tbody>
-            </table>
-            <div id="empty-state" class="empty-state" hidden>
-              <span aria-hidden="true">◎</span>
-              <h3>No homes match these filters</h3>
-              <p>Reset one or two controls to bring the shortlist back.</p>
-            </div>
-          </div>
-          <nav class="results-pagination" aria-label="Housing result pages">
-            <button id="previous-page" class="text-button" type="button">Previous</button>
-            <span id="page-status" aria-live="polite">Page 1</span>
-            <button id="next-page" class="text-button" type="button">Next</button>
-          </nav>
-        </section>
-
-        <section class="pareto-panel" aria-labelledby="pareto-heading">
-          <div class="panel-heading">
-            <div>
-              <p id="pareto-axis-context" class="eyebrow">PRICE ↓ · ALL ANCHORS (BALANCED) BURDEN ↓</p>
-              <h2 id="pareto-heading">Pareto frontier</h2>
-            </div>
-            <div class="pareto-heading-actions">
-              <label class="compact-field" for="pareto-perspective">Commute perspective
-                <select id="pareto-perspective">
-                  <option value="balanced">All anchors (balanced)</option>
-                </select>
-              </label>
-              <span id="pareto-total" class="frontier-pill">0 efficient</span>
-            </div>
-          </div>
-          <div id="pareto-chart" class="pareto-chart" role="group" aria-label="Interactive chart of effective monthly price and location burden"></div>
-          <article id="chart-detail" class="chart-detail" aria-live="polite">
-            Select a chart point to inspect its housing trade-off.
-          </article>
-          <p id="pareto-caption" class="panel-caption">Only eligible, still-actionable homes with comparable metrics enter the frontier.</p>
-        </section>
-      </section>
-
-      <section id="compare-section" class="compare-section" aria-labelledby="compare-heading" hidden>
-        <div class="filter-heading-row">
-          <div>
-            <p class="eyebrow">SHORTLIST</p>
-            <h2 id="compare-heading">Compare up to three homes</h2>
-          </div>
-          <button id="clear-compare" class="text-button" type="button">Clear comparison</button>
-        </div>
-        <div id="compare" class="compare-grid"></div>
-      </section>
-
-      <section class="operations-grid">
-        <section class="source-panel" aria-labelledby="source-heading">
-          <div class="filter-heading-row">
-            <div><p class="eyebrow">PIPELINE HEALTH</p><h2 id="source-heading">Housing sources</h2></div>
-          </div>
-          <div id="source-health" class="source-health"></div>
-        </section>
-        <section class="fallback-panel" aria-labelledby="fallback-heading">
-          <div class="filter-heading-row">
-            <div><p class="eyebrow">MANUAL COVERAGE</p><h2 id="fallback-heading">Fallback searches</h2></div>
-          </div>
-          <div id="fallbacks" class="fallback-grid"></div>
-        </section>
-      </section>
-    </main>
-  </body>
-</html>
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light"><title>Japan Housing · Decision desk</title>
+  <link rel="stylesheet" href="/vendor/leaflet.css"><link rel="stylesheet" href="/decision.css">
+  <script src="/vendor/leaflet.js" defer></script><script type="module" src="/decision-app.mjs"></script>
+</head>
+<body>
+<a class="skip" href="#results">Skip to rooms</a>
+<header><a class="brand" href="/">JH<span>JAPAN HOUSING</span></a><span id="freshness">Loading your decision desk…</span><button id="reload" type="button">Reload snapshot</button></header>
+<main>
+  <div class="intro"><div><p class="eyebrow">A ROOM FOR WHAT COMES NEXT</p><h1>Find your landing place.</h1><p>Compare the full stay. Keep room to change your plans.</p></div><div id="scenario-label" class="scenario-label"></div></div>
+  <div id="error" role="alert" hidden></div><p id="notice" class="notice" role="status" aria-live="polite"></p>
+  <form id="scenario-form" class="scenario-panel">
+    <div class="section-line"><h2>Your stay</h2><div class="duration-presets" aria-label="Stay length"><button type="button" data-months="1">1 month</button><button type="button" data-months="2">2 months</button><button type="button" data-months="3">3 months</button><button type="button" data-months="12">12 months</button></div></div>
+    <div class="scenario-fields">
+      <label>Move in<input name="move_in" type="date" required></label>
+      <label>Move out · exclusive<input name="move_out" type="date" required></label>
+      <label>Effective ceiling · ¥/month<input name="effective_budget_yen" type="number" min="1" max="10000000" step="1000" required></label>
+      <label>Cash available · ¥<input name="cash_budget_yen" type="number" min="0" max="100000000" step="1000"><small>0 = no cash filter</small></label>
+      <label>Minimum room · m²<input name="minimum_room_m2" type="number" min="0" max="500" step="0.5"></label>
+      <label>Commute limit · minutes<input name="commute_limit_minutes" type="number" min="1" max="240"></label>
+    </div>
+    <div class="scenario-bottom"><label class="weight-control">Price priority <output id="weight-label">85%</output><input name="price_weight" type="range" min="0" max="1" step="0.05"></label><label>Commute days / month<input name="transport_days_per_month" type="number" min="0" max="31"><small>For unreimbursed fare estimates</small></label><button class="primary" type="submit">Apply scenario</button></div>
+  </form>
+  <div id="summary" class="summary" aria-label="Evidence funnel"></div>
+  <section class="destinations-panel">
+    <div class="section-line"><div><h2>Where might you work?</h2><p>Office pins affect commutes. Remote and relocation destinations stay separate.</p></div><button id="toggle-destinations" type="button" aria-expanded="false" aria-controls="destination-editor">Edit locations</button></div>
+    <div id="destination-editor" hidden>
+      <p class="muted">Starting pins are area approximations from your job list. Confirm office entrances before relying on routes. Kichijoji is optional.</p>
+      <div id="destinations"></div>
+      <form id="destination-form" class="destination-form">
+        <input type="hidden" name="id"><label>Name<input name="label" maxlength="160" placeholder="Company, station or custom destination" required></label>
+        <label>Type<select name="kind"><option value="office">Office commute</option><option value="remote">Remote within Japan</option><option value="unknown">Office unknown</option><option value="relocation">Relocation possibility</option></select></label>
+        <label>Latitude<input name="latitude" type="number" step="any" min="-85" max="85"></label><label>Longitude<input name="longitude" type="number" step="any" min="-180" max="180"></label>
+        <label>Relative weight<input name="weight" type="number" min="0.01" max="100" step="0.1" value="1"></label>
+        <label>Office days / week<input name="office_days_per_week" type="number" min="0" max="7" step="0.5" placeholder="Unknown"></label>
+        <label class="check"><input name="verified" type="checkbox">Exact destination confirmed</label>
+        <div class="actions"><button id="drop-pin" type="button">Drop pin on map</button><button class="primary" type="submit">Save location</button><button id="cancel-destination" type="button">Cancel edit</button></div>
+      </form>
+    </div>
+  </section>
+  <div class="workspace-toolbar"><label class="search-label">Search<input id="query" type="search" placeholder="Room, area, station or operator"></label><label>Show<select id="status"><option value="feasible">Potential matches</option><option value="eligible">Meets requirements</option><option value="needs_confirmation">Needs confirmation</option><option value="excluded">Excluded</option><option value="stale">Stale</option><option value="all">All inventory</option></select></label><label>Sort<select id="sort"><option value="recommended">Evidence, then preference</option><option value="price">Effective expense</option><option value="cash">Cash before keys</option><option value="space">Room size</option><option value="commute">Observed commute</option><option value="verification">Fewest unknown costs</option></select></label><label>Decision<select id="decision"><option value="all">All</option><option value="shortlisted">Shortlisted</option><option value="contacted">Contacted</option><option value="reserved">Reserved</option><option value="not_interested">Not interested</option></select></label><div class="downloads"><a id="export-csv" href="/api/export?format=csv" download="housing-scenario.csv">CSV</a><a id="export-json" href="/api/export?format=json" download="housing-scenario.json">JSON</a></div></div>
+  <div class="workspace">
+    <section class="rooms-panel" id="results"><div class="section-line"><h2><span id="result-count">—</span> rooms</h2><span id="result-note" class="muted"></span></div>
+      <p id="ranking-note" class="muted"></p>
+      <div class="table-scroll" tabindex="0"><table><thead><tr><th scope="col">Room</th><th scope="col">Stay expense</th><th scope="col">Cash & space</th><th scope="col">Commute</th><th scope="col">Compare</th></tr></thead><tbody id="room-rows"></tbody></table></div>
+      <div id="empty" class="empty" hidden><h3>No rooms match this scenario.</h3><p>Inspect excluded rooms to see which requirement failed, or change your stay dates.</p></div>
+      <nav class="pagination" aria-label="Room pages"><button id="previous" type="button">Previous</button><span id="page-label"></span><button id="next" type="button">Next</button></nav>
+    </section>
+    <section class="visual-panel"><div class="tabs" role="tablist" aria-label="Room views"><button id="map-tab" role="tab" aria-selected="true" aria-controls="map-panel">Map & pins</button><button id="chart-tab" role="tab" aria-selected="false" aria-controls="chart-panel">Cost & commute</button></div><div id="map-panel" role="tabpanel" aria-labelledby="map-tab"><div id="housing-map" aria-label="Housing and editable destination map"></div><p id="map-note" class="muted"></p><p class="muted">Drag a destination pin to update it. Room pins open the same details as the table.</p></div><div id="chart-panel" role="tabpanel" aria-labelledby="chart-tab" hidden><div id="tradeoff-chart"></div><p class="muted">Only complete expense and observed commute data enter this frontier. Missing routes never become invented minutes.</p></div></section>
+  </div>
+  <section id="comparison" class="comparison" hidden><div class="section-line"><h2>Compare the same stay</h2><button id="clear-comparison" type="button">Clear</button></div><div id="comparison-cards"></div><div id="cost-chart"></div><p id="crossover-note" class="muted"></p></section>
+  <section class="coverage"><div class="section-line"><div><p class="eyebrow">WHAT WE KNOW, AND WHAT WE STILL NEED</p><h2>Source coverage</h2></div><button id="toggle-import" type="button" aria-expanded="false">Import reviewed listing</button></div><div id="sources"></div>
+    <form id="import-form" hidden><label>Reviewed listing JSON<textarea id="import-json" rows="10" spellcheck="false"></textarea></label><p class="muted">Local import only. Include exact room facts and provenance. Estimates remain separate from verified values.</p><button class="primary" type="submit">Import listing</button></form>
+  </section>
+</main>
+<dialog id="room-dialog" aria-labelledby="room-title"><div class="dialog-heading"><span class="eyebrow">ROOM DETAILS</span><button id="close-dialog" aria-label="Close room details" type="button">✕</button></div><div id="room-detail"></div></dialog>
+<footer>Costs are modeled for the selected dates. Confirm exact-room availability, registration, full fees and screening with the operator before booking.</footer>
+</body></html>

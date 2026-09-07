@@ -90,6 +90,32 @@ class HousingRecord:
     detail_verified_at: str = ""
     raw_evidence_hash: str = ""
     cluster_key: str = ""
+    # Amount paid as security is distinct from permanent expense. None means unknown.
+    deposit_yen: int | None = None
+    refundable_deposit_yen: int | None = None
+    deposit_in_initial_cost: bool = True
+    upfront_rent_months: int | None = None
+    billing_basis: str = "unknown"
+    minimum_stay_months: int | None = None
+    notice_days: int | None = None
+    early_exit_penalty_yen: int | None = None
+    early_exit_penalty_months: float | None = None
+    early_exit_before_months: int | None = None
+    campaign: dict[str, Any] = field(default_factory=dict)
+    room_area_m2: float | None = None
+    usable_area_m2: float | None = None
+    residents: int | None = None
+    showers: int | None = None
+    toilets: int | None = None
+    washers: int | None = None
+    floor: int | None = None
+    desk: bool | None = None
+    internet_download_mbps: float | None = None
+    internet_upload_mbps: float | None = None
+    screening_days: int | None = None
+    extension_available: bool | None = None
+    transfer_fee_yen: int | None = None
+    metrics_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -134,6 +160,20 @@ class CostScenario:
     effective_monthly_yen: int | None
     complete: bool
     unknown_costs: tuple[str, ...]
+    move_in: str = ""
+    move_out: str = ""
+    nights: int = 0
+    cash_before_keys_yen: int | None = None
+    cash_complete: bool = False
+    refundable_cash_yen: int | None = None
+    cost_upper_yen: int | None = None
+    contract_eligible: bool | None = None
+    contract_reasons: tuple[str, ...] = ()
+    penalty_free_exit_date: str = ""
+    notice_deadline: str = ""
+    discount_yen: int = 0
+    penalty_yen: int = 0
+    ledger: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

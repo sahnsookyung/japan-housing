@@ -478,10 +478,11 @@ def _best_estate_other_initial_fees(text: str) -> int:
 
 
 def _cluster(address: str, property_name: str, unit: str, rent: int | None) -> str:
-    value = "|".join(
-        re.sub(r"\W+", "", part.casefold())
-        for part in (address, property_name, unit, str(rent or ""))
-    )
+    # Rent changes do not create a new physical room. Do not collapse buildings
+    # without a published unit number into a guessed shared identity.
+    if not unit or not (address or property_name):
+        return ""
+    value = "|".join(re.sub(r"\W+", "", part.casefold()) for part in (address, property_name, unit))
     return hashlib.sha256(value.encode()).hexdigest()[:24] if value.strip("|") else ""
 
 
@@ -1008,6 +1009,7 @@ def _best_estate(ref: ListingRef, label: str, document: str) -> list[HousingReco
             price_validation=price_validation,
             initial_cost_yen=initial,
             exit_cost_yen=exit_cost,
+            deposit_yen=_label_amount("Deposit", text, rent_yen=rent),
             unknown_costs=tuple(unknown),
             available_from=_date(available_text),
             available_text=available_text,
@@ -1245,6 +1247,13 @@ def _oakhouse(ref: ListingRef, label: str, document: str) -> list[HousingRecord]
                 price_validation=price_validation,
                 initial_cost_yen=initial,
                 exit_cost_yen=0,
+                deposit_yen=0,
+                refundable_deposit_yen=0,
+                room_area_m2=(
+                    float(area.group(1))
+                    if (area := re.search(r"(\d+(?:\.\d+)?)\s*(?:m²|m2|㎡)", room_text))
+                    else None
+                ),
                 unknown_costs=unknown_costs,
                 available_from=_date(available_text),
                 available_text=availability_label,
@@ -1308,4 +1317,8 @@ def normalize_records(
         return records
     if ref.source_id == "oakhouse":
         return _oakhouse(ref, label, document)
+    if ref.source_id in {"modern_living", "gg_house", "tokyo_sharehouse"}:
+        from .share_sources import parse_share_source
+
+        return parse_share_source(ref, label, document)
     raise ValueError(f"unsupported source parser: {ref.source_id}")

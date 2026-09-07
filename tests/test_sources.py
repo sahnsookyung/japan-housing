@@ -19,7 +19,14 @@ class _ListClient:
 def test_source_registry_is_fixed_and_uses_bounded_oakhouse_index() -> None:
     specs = {spec.source_id: spec for spec in source_specs()}
 
-    assert set(specs) == {"oakhouse", "best_estate", "wagaya"}
+    assert set(specs) == {
+        "oakhouse",
+        "best_estate",
+        "wagaya",
+        "modern_living",
+        "gg_house",
+        "tokyo_sharehouse",
+    }
     assert specs["oakhouse"].seeds == ("https://www.oakhouse.jp/eng/house_index",)
     assert specs["oakhouse"].discovery_mode == "list"
     assert specs["oakhouse"].authoritative_disappearance

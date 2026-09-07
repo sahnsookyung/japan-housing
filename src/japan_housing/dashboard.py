@@ -12,6 +12,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import AppConfig
+from .decision_service import DecisionService
+from .evidence import EvidenceStore
 from .models import ACTIONABLE_CLASSIFICATIONS
 from .pareto import BALANCED_PERSPECTIVE_ID, is_pareto_candidate, pareto_frontier_keys
 from .report import load_latest
@@ -26,6 +28,12 @@ ASSETS = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/housing-pareto.mjs": ("housing-pareto.mjs", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/decision-app.mjs": ("decision-app.mjs", "text/javascript; charset=utf-8"),
+    "/decision-map.mjs": ("decision-map.mjs", "text/javascript; charset=utf-8"),
+    "/decision-charts.mjs": ("decision-charts.mjs", "text/javascript; charset=utf-8"),
+    "/decision.css": ("decision.css", "text/css; charset=utf-8"),
+    "/vendor/leaflet.js": ("vendor/leaflet.js", "text/javascript; charset=utf-8"),
+    "/vendor/leaflet.css": ("vendor/leaflet.css", "text/css; charset=utf-8"),
 }
 
 DASHBOARD_RECORD_FIELDS = frozenset(
@@ -339,6 +347,7 @@ def host_header_is_loopback(value: str) -> bool:
 
 def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
     snapshots = _SnapshotCache(config.runtime.artifacts_path)
+    decisions = DecisionService(config, snapshots)
 
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "JapanHousingDashboard/0.1"
@@ -361,12 +370,13 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
             if etag:
                 self.send_header("ETag", etag)
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; "
+                "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; "
+                "style-src 'self' 'unsafe-inline'; script-src 'self'; "
                 "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             )
             self.end_headers()
@@ -392,6 +402,24 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
             path = urlparse(self.path).path
             if not self._valid_local_request():
                 self._json(HTTPStatus.FORBIDDEN, {"error": "loopback Host header required"})
+                return
+            if path in {"/api/decision", "/api/listing", "/api/compare", "/api/export"}:
+                params = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                try:
+                    if path == "/api/decision":
+                        self._json(200, decisions.query(params))
+                    elif path == "/api/listing":
+                        self._json(200, decisions.detail(params.get("id", [""])[0]))
+                    elif path == "/api/compare":
+                        self._json(200, decisions.compare(params.get("id", [])))
+                    else:
+                        body, mime = decisions.export(params, params.get("format", ["json"])[0])
+                        self._headers(200, mime, len(body))
+                        self.wfile.write(body)
+                except (ValueError, KeyError, TypeError) as exc:
+                    self._json(400, {"error": str(exc)})
+                except (OSError, RuntimeError) as exc:
+                    self._json(503, {"error": str(exc)})
                 return
             if path == "/api/report":
                 try:
@@ -425,6 +453,49 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            if path in {"/api/preferences", "/api/evidence", "/api/import"}:
+                if not self._valid_local_request() or self.headers.get("X-Japan-Housing") != "1":
+                    self._json(403, {"error": "local dashboard request required"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._json(415, {"error": "JSON required"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 65536:
+                        raise ValueError("request exceeds the 64 KiB limit")
+                    payload = json.loads(self.rfile.read(length))
+                    if path == "/api/preferences":
+                        self._json(200, decisions.save(payload))
+                    else:
+                        with decisions.lock:
+                            with EvidenceStore(config.runtime.state_path) as evidence:
+                                if path == "/api/evidence":
+                                    key = payload.get("stable_key", "")
+                                    current = decisions.detail(key)
+                                    from .evidence import validate_fields
+
+                                    validate_fields(
+                                        {
+                                            **{
+                                                k: v
+                                                for k, v in current.items()
+                                                if k in payload.get("values", {})
+                                            },
+                                            **payload.get("values", {}),
+                                        }
+                                    )
+                                    evidence.add(key, payload)
+                                else:
+                                    key = evidence.import_record(payload)
+                            decisions.invalidate()
+                        self._json(200, {"stable_key": key})
+                except (ValueError, KeyError, TypeError) as exc:
+                    self._json(400, {"error": str(exc)})
+                except (OSError, RuntimeError) as exc:
+                    self._json(503, {"error": str(exc)})
+                return
             if urlparse(self.path).path != "/api/decisions":
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
@@ -449,6 +520,7 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
                 with StateStore(config.runtime.state_path) as store:
                     store.set_decision(stable_key, status, note)
                 snapshots.update_decision(stable_key, status, note)
+                decisions.invalidate()
             except (KeyError, TypeError, ValueError) as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return

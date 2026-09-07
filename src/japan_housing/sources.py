@@ -41,6 +41,7 @@ class SourceSpec:
     detail_budget_per_run: int | None = None
     stale_after_hours: int | None = 72
     stale_revalidation_budget: int = 0
+    pagination_patterns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,10 @@ class DiscoveryBatch:
 
 def _external_id(url: str) -> str:
     parsed = urlparse(url)
+    if (parsed.hostname or "").endswith("modernlivingjapan.com"):
+        return parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    if (parsed.hostname or "").endswith("gghouse.co.jp"):
+        return parsed.path.rstrip("/").rsplit("/", 1)[-1].lower()
     query = parse_qs(parsed.query)
     if query.get("id") and query["id"][0].isdigit():
         return query["id"][0]
@@ -141,6 +146,8 @@ class SourceAdapter:
         )
 
     def _discover_lists(self, cursor: str | None, budget: int) -> DiscoveryBatch:
+        if self.spec.pagination_patterns:
+            return self._discover_paginated(cursor, budget)
         refs: dict[str, ListingRef] = {}
         pages = 0
         try:
@@ -181,6 +188,37 @@ class SourceAdapter:
             pages,
             complete,
         )
+
+    def _discover_paginated(self, cursor: str | None, budget: int) -> DiscoveryBatch:
+        saved = json.loads(cursor) if cursor and cursor.startswith("{") else {}
+        queue = deque(saved.get("queue", self.spec.seeds))
+        visited = set(saved.get("visited", []))
+        refs: dict[str, ListingRef] = {}
+        pages = 0
+        while queue and pages < budget and len(visited) < 500:
+            url = queue.popleft()
+            if url in visited:
+                continue
+            if not self.client.robots_allowed(url, allowed_hosts=self.spec.allowed_hosts):
+                raise HttpFailure(f"robots policy disallows {url}")
+            response = self.client.get(url, allowed_hosts=self.spec.allowed_hosts)
+            if response.status_code != 200:
+                raise HttpFailure(f"list page returned {response.status_code}: {url}")
+            visited.add(url)
+            pages += 1
+            for target, label in links(response.text, response.url):
+                if urlparse(target).hostname not in self.spec.allowed_hosts:
+                    continue
+                if self._is_detail(target):
+                    ref = _ref(self.spec.source_id, target, label)
+                    refs[ref.external_id] = ref
+                elif any(re.search(pattern, target) for pattern in self.spec.pagination_patterns):
+                    if target not in visited and target not in queue and len(queue) < 500:
+                        queue.append(target)
+        cursor = json.dumps({"queue": list(queue), "visited": sorted(visited)}) if queue else None
+        if queue and len(visited) >= 500:
+            raise HttpFailure("discovery exceeded the 500-page scope bound")
+        return DiscoveryBatch(tuple(refs.values()), cursor, pages, not queue)
 
     def _discover_sitemap(self, cursor: str | None, budget: int) -> DiscoveryBatch:
         queue = deque(cursor.split("\n") if cursor else self.spec.seeds)
@@ -315,6 +353,39 @@ def source_specs() -> tuple[SourceSpec, ...]:
             interval_hours=12,
             detail_budget_per_run=40,
             stale_revalidation_budget=25,
+        ),
+        SourceSpec(
+            "modern_living",
+            "Modern Living",
+            ("https://modernlivingjapan.com/en/properties",),
+            frozenset({"modernlivingjapan.com", "www.modernlivingjapan.com"}),
+            (r"https://modernlivingjapan\.com/en/properties/[a-z0-9-]+$",),
+            interval_hours=4,
+            detail_budget_per_run=30,
+            stale_revalidation_budget=10,
+            pagination_patterns=(r"/en/properties\?page=\d+$",),
+        ),
+        SourceSpec(
+            "gg_house",
+            "GG House / Tokyo β",
+            ("https://gghouse.co.jp/en/search/result.html?rent_min=0&rent_max=85000",),
+            frozenset({"gghouse.co.jp", "www.gghouse.co.jp"}),
+            (r"https://(?:www\.)?gghouse\.co\.jp/en/[a-zA-Z]+\d+/$",),
+            interval_hours=4,
+            detail_budget_per_run=30,
+            stale_revalidation_budget=10,
+            pagination_patterns=(r"/en/search/result\.html\?[^#]*page=\d+",),
+        ),
+        SourceSpec(
+            "tokyo_sharehouse",
+            "Tokyo Sharehouse",
+            ("https://tokyosharehouse.com/eng/",),
+            frozenset({"tokyosharehouse.com", "www.tokyosharehouse.com"}),
+            (r"https://(?:www\.)?tokyosharehouse\.com/eng/house/detail/\d+/$",),
+            interval_hours=4,
+            detail_budget_per_run=30,
+            stale_revalidation_budget=10,
+            pagination_patterns=(r"/eng/house/(?:list|area)/[^#]+",),
         ),
     )
 
