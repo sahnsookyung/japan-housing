@@ -7,12 +7,15 @@ import hashlib
 import json
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from .config import AppConfig
+from .decision import RECORD_FIELDS, decision_summary
+from .decision_service import DecisionService
 from .models import SourceRunResult, iso_now
 from .pareto import annotate_pareto_frontier
 from .sources import source_specs
@@ -95,8 +98,8 @@ def build_report_payload(
         and classification_invariant_ok
         else "partial"
     )
-    return {
-        "schema_version": 9,
+    payload = {
+        "schema_version": 10,
         "run_id": run_id,
         "generated_at": iso_now(),
         "status": status,
@@ -231,9 +234,109 @@ def build_report_payload(
         ],
         "housing": records,
     }
+    scenario_config = replace(config, runtime=replace(config.runtime, state_path=store.path))
+    service = DecisionService(scenario_config, SimpleNamespace(load=lambda: payload))
+    service.load()
+    projected = service._filtered({"status": ["all"]})
+    payload["decision_scenario"] = {
+        "preferences": service.preferences,
+        "summary": decision_summary(projected),
+    }
+    # Keep collector diagnostics for existing consumers; scenario fields are explicit.
+    additions = (
+        *RECORD_FIELDS,
+        "scenario",
+        "scenario_status",
+        "scenario_reasons",
+        "route_metrics",
+        "metrics",
+        "field_evidence",
+        "estimated_fields",
+    )
+    originals = {row["stable_key"]: row for row in records}
+    payload["housing"] = [
+        {
+            **originals.get(row["stable_key"], row),
+            **{name: row[name] for name in additions if name in row},
+            "scenario_priority_score": row["priority_score"],
+        }
+        for row in projected
+    ]
+    payload["housing_count"] = len(projected)
+    return payload
+
+
+def _decision_markdown(payload: dict[str, Any]) -> str:
+    decision = payload["decision_scenario"]
+    p, summary = decision["preferences"], decision["summary"]
+    lines = [
+        "# Japan Housing · Saved decision scenario",
+        "",
+        f"Stay: {p['move_in']} → {p['move_out']} (move-out exclusive)",
+        f"Effective ceiling: ¥{p['effective_budget_yen']:,}/month · "
+        f"price weight {p['price_weight']:.0%}",
+        f"Housing area: {p.get('housing_region', 'greater_tokyo')}",
+        f"Generated: {payload['generated_at']} · source status: {payload['status']}",
+        "",
+        f"{summary['current']} current · {summary['eligible']} meets requirements · "
+        f"{summary['needs_confirmation']} needs confirmation · "
+        f"{summary['route_complete']} complete office routes",
+        "",
+        "Expense excludes refundable security cash. "
+        "Incomplete amounts are known floors, not quotes.",
+        "Only observed routes to confirmed office pins receive a weighted score.",
+        "",
+        "| Room | Stay expense | Effective / month | Cash before keys | Status |",
+        "|---|---:|---:|---:|---|",
+    ]
+    candidates = [
+        r
+        for r in payload["housing"]
+        if r["scenario_status"] in {"eligible", "needs_confirmation"}
+        and r.get("decision_status") not in {"reserved", "not_interested"}
+    ]
+    for row in candidates[:50]:
+        s = row["scenario"]
+
+        def money(value):
+            return f"¥{value:,}" if value is not None else "Unknown"
+
+        floor = "" if s["complete"] else "≥ "
+        cash_floor = "" if s["cash_complete"] else "≥ "
+        title = str(row["title"]).replace("|", r"\|").replace("\n", " ")
+        lines.append(
+            f"| [{title}]({row['url']}) | {floor}{money(s['known_total_yen'])} | "
+            f"{floor}{money(s['effective_monthly_yen'])} | "
+            f"{cash_floor}{money(s['cash_before_keys_yen'])} | {row['scenario_status']} |"
+        )
+    if not candidates:
+        lines.append("No current potential matches for the selected dates.")
+    lines.extend(["", "## Saved employment destinations", ""])
+    for d in p["destinations"]:
+        lines.append(
+            f"- {d['label']}: {d['kind']} · {'enabled' if d['enabled'] else 'disabled'} · "
+            f"{'confirmed entrance' if d['verified'] else 'location unconfirmed'}"
+        )
+    lines.extend(["", "## Source coverage", ""])
+    for source in payload["source_health"]:
+        lines.append(
+            f"- {source['source_id']}: {source.get('last_status') or 'not run'} · "
+            f"{source.get('last_error') or 'no error recorded'}"
+        )
+    lines.extend(
+        [
+            "",
+            "The dashboard and its filtered exports use the same saved scenario. "
+            "Room details retain individual cost terms and provenance.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _markdown(payload: dict[str, Any]) -> str:
+    if "decision_scenario" in payload:
+        return _decision_markdown(payload)
     counts = payload.get("current_classification_counts") or payload["classification_counts"]
     freshness = payload.get("freshness_counts") or {}
     current_total = sum(int(value) for value in counts.values())
@@ -424,12 +527,42 @@ def _markdown(payload: dict[str, Any]) -> str:
 def _safe_csv(value: object) -> object:
     if isinstance(value, dict | list | tuple):
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    if isinstance(value, str) and value[:1] in {"=", "+", "-", "@"}:
+    if isinstance(value, str) and value.lstrip()[:1] in {"=", "+", "-", "@"}:
         return "'" + value
     return value
 
 
+def _write_scenario_csv(path: Path, records: list[dict[str, Any]]) -> None:
+    columns = (
+        "stable_key",
+        "title",
+        "scenario_status",
+        "move_in",
+        "move_out",
+        "known_total_yen",
+        "effective_monthly_yen",
+        "complete",
+        "cash_before_keys_yen",
+        "cash_complete",
+        "refundable_cash_yen",
+        "room_area_m2",
+        "mean_minutes",
+        "url",
+    )
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in records:
+            value = {**row, **row["scenario"], "mean_minutes": row["route_metrics"]["mean_minutes"]}
+            writer.writerow({key: _safe_csv(value.get(key, "")) for key in columns})
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
+    if records and "scenario" in records[0]:
+        _write_scenario_csv(path, records)
+        return
     columns = (
         "classification",
         "track",

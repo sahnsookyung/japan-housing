@@ -1,61 +1,511 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="light"><title>Japan Housing · Decision desk</title>
-  <link rel="stylesheet" href="/vendor/leaflet.css"><link rel="stylesheet" href="/decision.css">
-  <script src="/vendor/leaflet.js" defer></script><script type="module" src="/decision-app.mjs"></script>
-</head>
-<body>
-<a class="skip" href="#results">Skip to rooms</a>
-<header><a class="brand" href="/">JH<span>JAPAN HOUSING</span></a><span id="freshness">Loading your decision desk…</span><button id="reload" type="button">Reload snapshot</button></header>
-<main>
-  <div class="intro"><div><p class="eyebrow">A ROOM FOR WHAT COMES NEXT</p><h1>Find your landing place.</h1><p>Compare the full stay. Keep room to change your plans.</p></div><div id="scenario-label" class="scenario-label"></div></div>
-  <div id="error" role="alert" hidden></div><p id="notice" class="notice" role="status" aria-live="polite"></p>
-  <form id="scenario-form" class="scenario-panel">
-    <div class="section-line"><h2>Your stay</h2><div class="duration-presets" aria-label="Stay length"><button type="button" data-months="1">1 month</button><button type="button" data-months="2">2 months</button><button type="button" data-months="3">3 months</button><button type="button" data-months="12">12 months</button></div></div>
-    <div class="scenario-fields">
-      <label>Move in<input name="move_in" type="date" required></label>
-      <label>Move out · exclusive<input name="move_out" type="date" required></label>
-      <label>Effective ceiling · ¥/month<input name="effective_budget_yen" type="number" min="1" max="10000000" step="1000" required></label>
-      <label>Cash available · ¥<input name="cash_budget_yen" type="number" min="0" max="100000000" step="1000"><small>0 = no cash filter</small></label>
-      <label>Minimum room · m²<input name="minimum_room_m2" type="number" min="0" max="500" step="0.5"></label>
-      <label>Commute limit · minutes<input name="commute_limit_minutes" type="number" min="1" max="240"></label>
-    </div>
-    <div class="scenario-bottom"><label class="weight-control">Price priority <output id="weight-label">85%</output><input name="price_weight" type="range" min="0" max="1" step="0.05"></label><label>Commute days / month<input name="transport_days_per_month" type="number" min="0" max="31"><small>For unreimbursed fare estimates</small></label><button class="primary" type="submit">Apply scenario</button></div>
-  </form>
-  <div id="summary" class="summary" aria-label="Evidence funnel"></div>
-  <section class="destinations-panel">
-    <div class="section-line"><div><h2>Where might you work?</h2><p>Office pins affect commutes. Remote and relocation destinations stay separate.</p></div><button id="toggle-destinations" type="button" aria-expanded="false" aria-controls="destination-editor">Edit locations</button></div>
-    <div id="destination-editor" hidden>
-      <p class="muted">Starting pins are area approximations from your job list. Confirm office entrances before relying on routes. Kichijoji is optional.</p>
-      <div id="destinations"></div>
-      <form id="destination-form" class="destination-form">
-        <input type="hidden" name="id"><label>Name<input name="label" maxlength="160" placeholder="Company, station or custom destination" required></label>
-        <label>Type<select name="kind"><option value="office">Office commute</option><option value="remote">Remote within Japan</option><option value="unknown">Office unknown</option><option value="relocation">Relocation possibility</option></select></label>
-        <label>Latitude<input name="latitude" type="number" step="any" min="-85" max="85"></label><label>Longitude<input name="longitude" type="number" step="any" min="-180" max="180"></label>
-        <label>Relative weight<input name="weight" type="number" min="0.01" max="100" step="0.1" value="1"></label>
-        <label>Office days / week<input name="office_days_per_week" type="number" min="0" max="7" step="0.5" placeholder="Unknown"></label>
-        <label class="check"><input name="verified" type="checkbox">Exact destination confirmed</label>
-        <div class="actions"><button id="drop-pin" type="button">Drop pin on map</button><button class="primary" type="submit">Save location</button><button id="cancel-destination" type="button">Cancel edit</button></div>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Japan Housing · Decision desk</title>
+    <link rel="stylesheet" href="/vendor/leaflet.css" />
+    <link rel="stylesheet" href="/decision.css" />
+    <script src="/vendor/leaflet.js" defer></script>
+    <script type="module" src="/decision-app.mjs"></script>
+  </head>
+  <body>
+    <a class="skip" href="#results">Skip to rooms</a>
+    <header>
+      <a class="brand" href="/">JH<span>JAPAN HOUSING</span></a
+      ><span id="freshness">Loading your decision desk…</span
+      ><button id="reload" type="button">Reload snapshot</button>
+    </header>
+    <main>
+      <div class="intro">
+        <div>
+          <p class="eyebrow">A ROOM FOR WHAT COMES NEXT</p>
+          <h1>Find your landing place.</h1>
+          <p>Compare the full stay. Keep room to change your plans.</p>
+          <a id="browse-rooms" class="browse-link" href="#results"
+            >Browse rooms ↓</a
+          >
+        </div>
+        <div id="scenario-label" class="scenario-label"></div>
+      </div>
+      <div id="error" role="alert" hidden></div>
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+      <details id="stay-settings" class="stay-settings">
+        <summary id="stay-settings-label">
+          Edit stay, budget & preferences
+        </summary>
+        <form id="scenario-form" class="scenario-panel">
+          <div class="section-line">
+            <h2>Your stay</h2>
+            <div class="duration-presets" aria-label="Stay length">
+              <button type="button" data-months="1">1 month</button
+              ><button type="button" data-months="2">2 months</button
+              ><button type="button" data-months="3">3 months</button
+              ><button type="button" data-months="12">12 months</button>
+            </div>
+          </div>
+          <div class="scenario-fields">
+            <label
+              >Housing area<select name="housing_region">
+                <option value="greater_tokyo">Greater Tokyo</option>
+                <option value="kansai">Kansai · relocation</option>
+                <option value="japan">Japan · all stored regions</option>
+              </select></label
+            >
+            <label>Move in<input name="move_in" type="date" required /></label>
+            <label
+              >Move out · exclusive<input name="move_out" type="date" required
+            /></label>
+            <label
+              >Effective ceiling · ¥/month<input
+                name="effective_budget_yen"
+                type="number"
+                min="1"
+                max="10000000"
+                step="1"
+                required
+            /></label>
+            <label
+              >Cash available · ¥<input
+                name="cash_budget_yen"
+                type="number"
+                min="0"
+                max="100000000"
+                step="1"
+              /><small>0 = no cash filter</small></label
+            >
+            <label
+              >Minimum room · m²<input
+                name="minimum_room_m2"
+                type="number"
+                min="0"
+                max="500"
+                step="any"
+            /></label>
+            <label
+              >Commute limit · minutes<input
+                name="commute_limit_minutes"
+                type="number"
+                min="1"
+                max="240"
+            /></label>
+          </div>
+          <div class="scenario-bottom">
+            <label class="weight-control"
+              >Price priority <output id="weight-label">85%</output
+              ><input
+                name="price_weight"
+                type="range"
+                min="0"
+                max="1"
+                step="0.05" /></label
+            ><label
+              >Commute days / month<input
+                name="transport_days_per_month"
+                type="number"
+                min="0"
+                max="31"
+              /><small>For unreimbursed fare estimates</small></label
+            >
+            <div class="actions">
+              <button id="revert-scenario" type="button" hidden>
+                Revert edits</button
+              ><button id="apply-scenario" class="primary" type="submit">
+                Apply scenario
+              </button>
+            </div>
+          </div>
+          <p id="scenario-draft" class="muted" role="status">
+            Results use the saved scenario.
+          </p>
+        </form>
+      </details>
+      <details class="inventory-summary">
+        <summary id="inventory-summary-label">
+          Inventory evidence · all stored listings
+        </summary>
+        <div id="summary" class="summary" aria-label="Evidence funnel"></div>
+        <p class="muted summary-caption">
+          Entire saved scenario · before search filters. Coverage counts refer
+          to potential matches.
+        </p>
+      </details>
+      <section class="destinations-panel">
+        <div class="section-line">
+          <div>
+            <h2>Where might you work?</h2>
+            <p>
+              Office pins affect commutes. Remote and relocation destinations
+              stay separate.
+            </p>
+          </div>
+          <div class="actions">
+            <button id="undo-pin" type="button" disabled>
+              Undo last pin change</button
+            ><button
+              id="toggle-destinations"
+              type="button"
+              aria-expanded="false"
+              aria-controls="destination-editor"
+            >
+              Edit locations
+            </button>
+          </div>
+        </div>
+        <div id="destination-editor" hidden>
+          <p class="muted">
+            Starting pins are area approximations from your job list. Confirm
+            office entrances before relying on routes. Kichijoji is optional.
+          </p>
+          <div id="destinations"></div>
+          <form id="destination-form" class="destination-form">
+            <input type="hidden" name="id" /><label
+              >Name<input
+                name="label"
+                maxlength="160"
+                placeholder="Company, station or custom destination"
+                required
+            /></label>
+            <label
+              >Type<select name="kind">
+                <option value="office">Office commute</option>
+                <option value="remote">Remote within Japan</option>
+                <option value="unknown">Office unknown</option>
+                <option value="relocation">Relocation possibility</option>
+              </select></label
+            >
+            <label
+              >Latitude<input
+                name="latitude"
+                type="number"
+                step="any"
+                min="-85"
+                max="85" /></label
+            ><label
+              >Longitude<input
+                name="longitude"
+                type="number"
+                step="any"
+                min="-180"
+                max="180"
+            /></label>
+            <label
+              >Relative weight<input
+                name="weight"
+                type="number"
+                min="0.01"
+                max="100"
+                step="0.01"
+                value="1"
+            /></label>
+            <label
+              >Office days / week<input
+                name="office_days_per_week"
+                type="number"
+                min="0"
+                max="7"
+                step="0.5"
+                placeholder="Unknown"
+            /></label>
+            <label class="check"
+              ><input name="verified" type="checkbox" />Exact destination
+              confirmed</label
+            >
+            <div class="actions">
+              <button id="drop-pin" type="button">Drop pin on map</button
+              ><button class="primary" type="submit">Save location</button
+              ><button id="cancel-destination" type="button">
+                Cancel edit
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <div class="workspace-toolbar">
+        <label class="search-label"
+          >Search<input
+            id="query"
+            type="search"
+            maxlength="200"
+            placeholder="Room, area, station or operator" /></label
+        ><label
+          >Show<select id="status">
+            <option value="feasible">Potential matches</option>
+            <option value="eligible">Meets requirements</option>
+            <option value="needs_confirmation">Needs confirmation</option>
+            <option value="excluded">Excluded</option>
+            <option value="stale">Stale</option>
+            <option value="all">All inventory</option>
+          </select></label
+        ><label
+          >Sort<select id="sort">
+            <option value="recommended">Evidence, then preference</option>
+            <option value="price">Effective expense</option>
+            <option value="cash">Cash before keys</option>
+            <option value="space">Room size</option>
+            <option value="commute">Observed commute</option>
+            <option value="distance">Straight-line distance</option>
+            <option value="verification">Fewest unknown costs</option>
+          </select></label
+        ><label
+          >Decision<select id="decision">
+            <option value="all">All</option>
+            <option value="new">Not reviewed</option>
+            <option value="shortlisted">Shortlisted</option>
+            <option value="contacted">Contacted</option>
+            <option value="reserved">Reserved</option>
+            <option value="not_interested">Not interested</option>
+          </select></label
+        >
+        <div class="downloads">
+          <a
+            id="export-csv"
+            href="/api/export?format=csv"
+            download="housing-scenario.csv"
+            >CSV</a
+          ><a
+            id="export-json"
+            href="/api/export?format=json"
+            download="housing-scenario.json"
+            >JSON</a
+          >
+        </div>
+        <button id="reset-filters" type="button">Reset filters</button>
+      </div>
+      <details id="view-statistics" class="view-statistics">
+        <summary id="statistics-title">Statistics for this view</summary>
+        <div id="statistics-cards" class="statistics-cards"></div>
+        <p id="statistics-coverage" class="muted"></p>
+        <p id="statistics-gaps" class="muted"></p>
+        <p id="statistics-note" class="muted"></p>
+      </details>
+      <div class="workspace">
+        <section class="rooms-panel" id="results">
+          <div class="section-line">
+            <h2><span id="result-count">—</span> rooms</h2>
+            <span id="result-note" class="muted" role="status"></span>
+          </div>
+          <p id="ranking-note" class="muted"></p>
+          <div
+            class="table-scroll"
+            tabindex="0"
+            role="region"
+            aria-label="Matching rooms"
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Room</th>
+                  <th scope="col">Stay expense</th>
+                  <th scope="col">Cash & space</th>
+                  <th scope="col">Commute</th>
+                  <th scope="col">Compare</th>
+                </tr>
+              </thead>
+              <tbody id="room-rows"></tbody>
+            </table>
+          </div>
+          <div id="empty" class="empty" hidden>
+            <h3>No rooms match these filters.</h3>
+            <p>
+              Inspect excluded rooms to see which requirement failed, or change
+              your stay dates.
+            </p>
+            <button id="empty-reset" type="button">
+              Reset search and filters
+            </button>
+          </div>
+          <nav class="pagination" aria-label="Room pages">
+            <button id="previous" type="button">Previous</button
+            ><span id="page-label"></span
+            ><button id="next" type="button">Next</button>
+          </nav>
+        </section>
+        <section class="visual-panel">
+          <div class="tabs" role="tablist" aria-label="Room views">
+            <button
+              id="map-tab"
+              role="tab"
+              aria-selected="true"
+              aria-controls="map-panel"
+            >
+              Map & pins</button
+            ><button
+              id="chart-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="chart-panel"
+            >
+              Pareto frontier
+            </button>
+          </div>
+          <div id="map-panel" role="tabpanel" aria-labelledby="map-tab">
+            <div
+              id="housing-map"
+              aria-label="Housing and editable destination map"
+            ></div>
+            <p id="map-note" class="muted"></p>
+            <p class="muted">
+              Drag a destination pin to preview a move, then confirm or cancel.
+              Green outlined room pins contain a Pareto choice for the selected
+              metric.
+            </p>
+          </div>
+          <div
+            id="chart-panel"
+            role="tabpanel"
+            aria-labelledby="chart-tab"
+            hidden
+          >
+            <h2>Pareto frontier</h2>
+            <label
+              >Compare cost against<select id="chart-metric">
+                <option value="transit">Observed transit · minutes</option>
+                <option value="distance">
+                  Straight-line distance · km (geographic estimate)
+                </option>
+              </select></label
+            >
+            <p id="frontier-summary" class="muted" aria-live="polite"></p>
+            <div class="chart-legend" aria-label="Chart legend">
+              <span
+                ><i class="legend-boundary" aria-hidden="true"></i>Complete-case
+                boundary</span
+              >
+              <span
+                ><i class="legend-provisional-boundary" aria-hidden="true"></i
+                >Provisional frontier · plotted values, fees may rise</span
+              >
+              <span
+                ><i class="legend-frontier" aria-hidden="true"></i>Frontier
+                among complete cases</span
+              >
+              <span
+                ><i class="legend-complete" aria-hidden="true"></i>Other
+                complete cases</span
+              >
+              <span
+                ><i class="legend-provisional" aria-hidden="true"></i>Needs
+                confirmation · known minimum if fees are missing</span
+              >
+            </div>
+            <div id="tradeoff-chart"></div>
+            <details id="chart-room-browser">
+              <summary id="chart-room-summary">Browse plotted rooms</summary>
+              <div id="chart-room-list" class="chart-room-list"></div>
+            </details>
+            <details id="unplotted-rooms" hidden>
+              <summary id="unplotted-summary">Rooms without a point</summary>
+              <div id="unplotted-list" class="chart-room-list"></div>
+            </details>
+            <p id="distance-method" class="muted"></p>
+            <p class="muted">
+              All potential matches with enough data are plotted. The frontier
+              highlights rooms that cannot be beaten on both price and location
+              among complete cases. Provisional rooms remain visible; missing
+              fees may increase their final price. A highlighted room is not a
+              proven winner over unverified alternatives. Solid green steps show
+              the complete-case boundary; dashed amber steps show the
+              provisional frontier using the currently plotted values. Steps
+              show the boundary of dominated values, not extra rooms or
+              interpolated offers. Hover or focus a point for its property name.
+              The 85:15 preference ranks rooms separately; it does not define
+              the frontier.
+            </p>
+          </div>
+        </section>
+      </div>
+      <section id="comparison" class="comparison" hidden>
+        <div class="section-line">
+          <h2>Compare the same stay</h2>
+          <button id="clear-comparison" type="button">Clear</button>
+        </div>
+        <div id="comparison-cards"></div>
+        <div id="cost-chart"></div>
+        <p id="crossover-note" class="muted"></p>
+      </section>
+      <aside
+        id="selection-tray"
+        class="selection-tray"
+        aria-label="Selected rooms"
+        hidden
+      >
+        <strong id="selection-count" role="status"></strong>
+        <div id="selection-items" class="selection-items"></div>
+        <div class="actions">
+          <button id="view-comparison" class="primary" type="button">
+            View comparison</button
+          ><button id="clear-selection" type="button">Clear selection</button>
+        </div>
+      </aside>
+      <section class="coverage">
+        <div class="section-line">
+          <div>
+            <p class="eyebrow">WHAT WE KNOW, AND WHAT WE STILL NEED</p>
+            <h2>Source coverage</h2>
+          </div>
+          <button id="toggle-import" type="button" aria-expanded="false">
+            Import reviewed listing
+          </button>
+        </div>
+        <div id="sources"></div>
+        <form id="import-form" hidden>
+          <label
+            >Reviewed listing JSON<textarea
+              id="import-json"
+              rows="10"
+              spellcheck="false"
+            ></textarea>
+          </label>
+          <p class="muted">
+            Local import only. Include exact room facts and provenance.
+            Estimates remain separate from verified values.
+          </p>
+          <button class="primary" type="submit">Import listing</button>
+        </form>
+      </section>
+    </main>
+    <dialog
+      id="pin-dialog"
+      aria-labelledby="pin-title"
+      aria-describedby="pin-impact"
+    >
+      <h2 id="pin-title">Confirm pin move</h2>
+      <p id="pin-location"></p>
+      <dl>
+        <dt>Saved coordinates</dt>
+        <dd id="pin-before"></dd>
+        <dt>Proposed coordinates</dt>
+        <dd id="pin-after"></dd>
+      </dl>
+      <p id="pin-impact">
+        The saved location and routes stay active until you confirm. Confirming
+        does not scan listings or fetch routes. Routes for other locations stay
+        usable; matching routes can be reused when you undo while they remain
+        fresh.
+      </p>
+      <form method="dialog" class="actions">
+        <button value="cancel" autofocus>Cancel move</button
+        ><button value="confirm" class="primary">Confirm pin move</button>
       </form>
-    </div>
-  </section>
-  <div class="workspace-toolbar"><label class="search-label">Search<input id="query" type="search" placeholder="Room, area, station or operator"></label><label>Show<select id="status"><option value="feasible">Potential matches</option><option value="eligible">Meets requirements</option><option value="needs_confirmation">Needs confirmation</option><option value="excluded">Excluded</option><option value="stale">Stale</option><option value="all">All inventory</option></select></label><label>Sort<select id="sort"><option value="recommended">Evidence, then preference</option><option value="price">Effective expense</option><option value="cash">Cash before keys</option><option value="space">Room size</option><option value="commute">Observed commute</option><option value="verification">Fewest unknown costs</option></select></label><label>Decision<select id="decision"><option value="all">All</option><option value="shortlisted">Shortlisted</option><option value="contacted">Contacted</option><option value="reserved">Reserved</option><option value="not_interested">Not interested</option></select></label><div class="downloads"><a id="export-csv" href="/api/export?format=csv" download="housing-scenario.csv">CSV</a><a id="export-json" href="/api/export?format=json" download="housing-scenario.json">JSON</a></div></div>
-  <div class="workspace">
-    <section class="rooms-panel" id="results"><div class="section-line"><h2><span id="result-count">—</span> rooms</h2><span id="result-note" class="muted"></span></div>
-      <p id="ranking-note" class="muted"></p>
-      <div class="table-scroll" tabindex="0"><table><thead><tr><th scope="col">Room</th><th scope="col">Stay expense</th><th scope="col">Cash & space</th><th scope="col">Commute</th><th scope="col">Compare</th></tr></thead><tbody id="room-rows"></tbody></table></div>
-      <div id="empty" class="empty" hidden><h3>No rooms match this scenario.</h3><p>Inspect excluded rooms to see which requirement failed, or change your stay dates.</p></div>
-      <nav class="pagination" aria-label="Room pages"><button id="previous" type="button">Previous</button><span id="page-label"></span><button id="next" type="button">Next</button></nav>
-    </section>
-    <section class="visual-panel"><div class="tabs" role="tablist" aria-label="Room views"><button id="map-tab" role="tab" aria-selected="true" aria-controls="map-panel">Map & pins</button><button id="chart-tab" role="tab" aria-selected="false" aria-controls="chart-panel">Cost & commute</button></div><div id="map-panel" role="tabpanel" aria-labelledby="map-tab"><div id="housing-map" aria-label="Housing and editable destination map"></div><p id="map-note" class="muted"></p><p class="muted">Drag a destination pin to update it. Room pins open the same details as the table.</p></div><div id="chart-panel" role="tabpanel" aria-labelledby="chart-tab" hidden><div id="tradeoff-chart"></div><p class="muted">Only complete expense and observed commute data enter this frontier. Missing routes never become invented minutes.</p></div></section>
-  </div>
-  <section id="comparison" class="comparison" hidden><div class="section-line"><h2>Compare the same stay</h2><button id="clear-comparison" type="button">Clear</button></div><div id="comparison-cards"></div><div id="cost-chart"></div><p id="crossover-note" class="muted"></p></section>
-  <section class="coverage"><div class="section-line"><div><p class="eyebrow">WHAT WE KNOW, AND WHAT WE STILL NEED</p><h2>Source coverage</h2></div><button id="toggle-import" type="button" aria-expanded="false">Import reviewed listing</button></div><div id="sources"></div>
-    <form id="import-form" hidden><label>Reviewed listing JSON<textarea id="import-json" rows="10" spellcheck="false"></textarea></label><p class="muted">Local import only. Include exact room facts and provenance. Estimates remain separate from verified values.</p><button class="primary" type="submit">Import listing</button></form>
-  </section>
-</main>
-<dialog id="room-dialog" aria-labelledby="room-title"><div class="dialog-heading"><span class="eyebrow">ROOM DETAILS</span><button id="close-dialog" aria-label="Close room details" type="button">✕</button></div><div id="room-detail"></div></dialog>
-<footer>Costs are modeled for the selected dates. Confirm exact-room availability, registration, full fees and screening with the operator before booking.</footer>
-</body></html>
+    </dialog>
+    <dialog id="room-dialog" aria-labelledby="room-title">
+      <div class="dialog-heading">
+        <span class="eyebrow">ROOM DETAILS</span
+        ><button
+          id="close-dialog"
+          aria-label="Close room details"
+          type="button"
+        >
+          ✕
+        </button>
+      </div>
+      <div id="room-detail"></div>
+    </dialog>
+    <footer>
+      Costs are modeled for the selected dates. Confirm exact-room availability,
+      registration, full fees and screening with the operator before booking.
+    </footer>
+  </body>
+</html>

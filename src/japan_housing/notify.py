@@ -201,6 +201,35 @@ def notify_changes(
 
 
 def _report_content(payload: dict[str, object]) -> str:
+    if isinstance(payload.get("decision_scenario"), dict):
+        scenario = payload["decision_scenario"]
+        p, counts = scenario["preferences"], scenario["summary"]
+        lines = [
+            "📌 **Japan Housing · Saved scenario**",
+            f"{p['move_in']} → {p['move_out']} · ¥{p['effective_budget_yen']:,} effective ceiling",
+            f"{counts['current']} current · {counts['eligible']} meets requirements · "
+            f"{counts['needs_confirmation']} needs confirmation",
+            "",
+        ]
+        candidates = [
+            r
+            for r in payload["housing"]
+            if r.get("scenario_status") in {"eligible", "needs_confirmation"}
+            and r.get("decision_status") not in {"reserved", "not_interested"}
+        ]
+        for row in candidates[:5]:
+            s = row["scenario"]
+            amount = s["effective_monthly_yen"]
+            cost = f"¥{amount:,}/month" if amount is not None else "cost unknown"
+            floor = "" if s["complete"] else "known floor "
+            lines.append(
+                f"• [{_safe(row['title'])[:80]}]({row['url']}) · "
+                f"{floor}{cost} · {row['scenario_status']}"
+            )
+        lines.append(
+            "\nRefundable deposits are separate. Unknown routes are never invented minutes."
+        )
+        return "\n".join(lines)[:1950]
     counts = payload.get("classification_counts")
     counts = counts if isinstance(counts, dict) else {}
     current_counts = payload.get("current_classification_counts")

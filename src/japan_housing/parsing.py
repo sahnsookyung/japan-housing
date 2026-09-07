@@ -1128,6 +1128,14 @@ def _wagaya(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
             price_basis="detail_components",
             price_validation=price_validation,
             initial_cost_yen=initial,
+            deposit_yen=_label_amount(
+                "Deposit", _section_after("Initial Cost Estimate", text), rent_yen=rent
+            ),
+            room_area_m2=(
+                float(area.group(1))
+                if (area := re.search(r"([\d.]+)\s*(?:m²|m2|㎡)", detail_value("Area")))
+                else None
+            ),
             exit_cost_yen=exit_cost,
             unknown_costs=tuple(unknown),
             available_from=_date(available_text),
@@ -1320,5 +1328,5 @@ def normalize_records(
     if ref.source_id in {"modern_living", "gg_house", "tokyo_sharehouse"}:
         from .share_sources import parse_share_source
 
-        return parse_share_source(ref, label, document)
+        return parse_share_source(ref, label, document, supplemental_document)
     raise ValueError(f"unsupported source parser: {ref.source_id}")

@@ -410,11 +410,11 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
     assert latest_path == published.json_path
     assert published.markdown_path.exists()
     csv_text = published.csv_path.read_text(encoding="utf-8")
-    assert "advertised_monthly_from_yen" in csv_text.splitlines()[0]
-    assert "priority_score" in csv_text.splitlines()[0]
-    assert "pareto_location_score" in csv_text.splitlines()[0]
-    assert "pareto_location_scores" in csv_text.splitlines()[0]
-    assert latest["schema_version"] == 9
+    assert "effective_monthly_yen" in csv_text.splitlines()[0]
+    assert "cash_before_keys_yen" in csv_text.splitlines()[0]
+    assert "refundable_cash_yen" in csv_text.splitlines()[0]
+    assert "move_out" in csv_text.splitlines()[0]
+    assert latest["schema_version"] == 10
     assert latest["evidence_policy"] == {
         "mode": "separate_unverified",
         "strict_evidence": True,
@@ -447,12 +447,16 @@ def test_reports_publish_atomically_and_escape_csv_formulas(
         "shibuya",
         "shinjuku",
     }
-    assert csv_text.splitlines()[1].startswith("eligible")
+    assert (
+        latest["housing"][0]["scenario"]["move_in"]
+        == latest["decision_scenario"]["preferences"]["move_in"]
+    )
     assert "'=formula-like title" in csv_text
     markdown = published.markdown_path.read_text(encoding="utf-8")
-    assert "ranking mean 90.0 min including missing-route penalties" in markdown
-    assert "Pareto frontier: 1 of 1" in markdown
-    assert "Anchor-specific Pareto frontiers: Kichijoji Station 1/1" in markdown
+    assert "Saved decision scenario" in markdown
+    assert "known floors" in markdown
+    assert "confirmed office pins" in markdown
+    assert "scored" not in markdown
     manifest = json.loads((published.directory / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"housing.json", "housing.md", "housing.csv"}
     assert '\n  "schema_version"' not in published.json_path.read_text(encoding="utf-8")
@@ -607,3 +611,27 @@ def test_report_retention_enforces_storage_cap(tmp_path: Path) -> None:
     assert not directories[0].exists()
     assert directories[1].exists()
     assert directories[2].exists()
+
+
+def test_saved_report_retains_reviewed_values_and_their_provenance(app_config, tmp_path):
+    from japan_housing.evidence import EvidenceStore
+
+    path = tmp_path / "housing.sqlite3"
+    with StateStore(path) as store:
+        store.ensure_sources((_spec(),))
+        _promote(store, app_config, "initial")
+        key = store.active_records()[0]["stable_key"]
+        with EvidenceStore(path) as evidence:
+            evidence.add(
+                key,
+                {
+                    "values": {"room_area_m2": 12.5},
+                    "kind": "confirmed",
+                    "source_url": "https://example.com/room-quote",
+                    "note": "Measured",
+                },
+            )
+        payload = build_report_payload(store, "reviewed", [], {}, app_config)
+    row = next(r for r in payload["housing"] if r["stable_key"] == key)
+    assert row["room_area_m2"] == 12.5
+    assert row["field_evidence"]["room_area_m2"]["note"] == "Measured"

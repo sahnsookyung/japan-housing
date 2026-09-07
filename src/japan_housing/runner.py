@@ -310,6 +310,8 @@ def _run_source(
             *store.order_detail_refs(stale_retryable, cache_by_id),
             *store.order_detail_refs(current_retryable, cache_by_id),
         ]
+        if spec.priority_urls:
+            network_refs.sort(key=lambda ref: ref.url not in spec.priority_urls)
         metrics.detail_candidates = len(network_refs)
         source_detail_budget = min(
             config.runtime.detail_budget_per_source,
@@ -326,6 +328,17 @@ def _run_source(
                 staged_count += _stage_records(store, run_id, ref, cache.records, config)
                 metrics.detail_cache_hits += 1
                 current_cache_hits += int(ref.external_id in current_ref_ids)
+
+        campaign_document = ""
+        if spec.source_id == "gg_house" and capped_refs:
+            campaign_ref = ListingRef(
+                "gg_house", "campaign", "https://gghouse.co.jp/en/now/rakuraku.html", ""
+            )
+            try:
+                campaign_document = adapter.fetch_detail(campaign_ref).text
+            except (HttpFailure, BudgetExhausted, CircuitOpen):
+                # Never apply an old campaign when its current terms cannot be fetched.
+                campaign_document = ""
 
         def fetch(ref: ListingRef) -> DetailResult:
             cache = cache_by_id[ref.external_id]
@@ -351,8 +364,35 @@ def _run_source(
                     last_modified or cache.last_modified,
                 )
             records = tuple(normalize_records(ref, spec.label, response.text))
+            if campaign_document:
+                from .share_sources import gg_campaign
+
+                for record in records:
+                    record.campaign = gg_campaign(campaign_document, campaign_ref, record)
             supplemental_network = 0
             supplemental_failures = 0
+            map_path = f"/eng/house/map/{ref.external_id}/"
+            if spec.source_id == "tokyo_sharehouse" and records and map_path in response.text:
+                supplemental_network = 1
+                try:
+                    map_response = adapter.fetch_detail(
+                        replace(ref, url="https://tokyosharehouse.com" + map_path)
+                    )
+                    if map_response.status_code == 200:
+                        records = tuple(
+                            normalize_records(
+                                ref,
+                                spec.label,
+                                response.text,
+                                supplemental_document=map_response.text,
+                            )
+                        )
+                    else:
+                        supplemental_failures = 1
+                except (BudgetExhausted, CircuitOpen):
+                    raise
+                except HttpFailure:
+                    supplemental_failures = 1
             if spec.source_id == "wagaya" and _wagaya_needs_layout_probe(records):
                 japanese_ref = replace(ref, url=ref.url.replace("/en/", "/jp/", 1))
                 supplemental_network = 1

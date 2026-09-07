@@ -42,6 +42,7 @@ class SourceSpec:
     stale_after_hours: int | None = 72
     stale_revalidation_budget: int = 0
     pagination_patterns: tuple[str, ...] = ()
+    priority_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +194,11 @@ class SourceAdapter:
         saved = json.loads(cursor) if cursor and cursor.startswith("{") else {}
         queue = deque(saved.get("queue", self.spec.seeds))
         visited = set(saved.get("visited", []))
-        refs: dict[str, ListingRef] = {}
+        refs = {
+            _external_id(url): _ref(self.spec.source_id, url, "User research target")
+            for url in self.spec.priority_urls
+            if self._is_detail(url)
+        }
         pages = 0
         while queue and pages < budget and len(visited) < 500:
             url = queue.popleft()
@@ -223,7 +228,11 @@ class SourceAdapter:
     def _discover_sitemap(self, cursor: str | None, budget: int) -> DiscoveryBatch:
         queue = deque(cursor.split("\n") if cursor else self.spec.seeds)
         visited: set[str] = set()
-        refs: dict[str, ListingRef] = {}
+        refs = {
+            _external_id(url): _ref(self.spec.source_id, url, "User research target")
+            for url in self.spec.priority_urls
+            if self._is_detail(url)
+        }
         pages = 0
         while queue and pages < budget:
             url = queue.popleft()
@@ -364,6 +373,7 @@ def source_specs() -> tuple[SourceSpec, ...]:
             detail_budget_per_run=30,
             stale_revalidation_budget=10,
             pagination_patterns=(r"/en/properties\?page=\d+$",),
+            priority_urls=("https://modernlivingjapan.com/en/properties/nakano-i-104",),
         ),
         SourceSpec(
             "gg_house",
@@ -375,6 +385,9 @@ def source_specs() -> tuple[SourceSpec, ...]:
             detail_budget_per_run=30,
             stale_revalidation_budget=10,
             pagination_patterns=(r"/en/search/result\.html\?[^#]*page=\d+",),
+            priority_urls=tuple(
+                f"https://gghouse.co.jp/en/{key}/" for key in ("g21", "F106", "L207", "J118")
+            ),
         ),
         SourceSpec(
             "tokyo_sharehouse",
@@ -386,6 +399,10 @@ def source_specs() -> tuple[SourceSpec, ...]:
             detail_budget_per_run=30,
             stale_revalidation_budget=10,
             pagination_patterns=(r"/eng/house/(?:list|area)/[^#]+",),
+            priority_urls=tuple(
+                f"https://tokyosharehouse.com/eng/house/detail/{key}/"
+                for key in (2608, 2579, 2609, 349, 350)
+            ),
         ),
     )
 

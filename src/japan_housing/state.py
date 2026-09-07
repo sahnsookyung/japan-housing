@@ -1239,6 +1239,15 @@ class StateStore:
         exists = self.connection.execute(
             "SELECT 1 FROM records WHERE stable_key=?", (stable_key,)
         ).fetchone()
+        if (
+            not exists
+            and self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='decision_imports'"
+            ).fetchone()
+        ):
+            exists = self.connection.execute(
+                "SELECT 1 FROM decision_imports WHERE stable_key=?", (stable_key,)
+            ).fetchone()
         if not exists:
             raise ValueError("unknown listing")
         with self.connection:

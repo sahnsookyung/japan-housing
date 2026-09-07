@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import AppConfig
 from .decision_service import DecisionService
-from .evidence import EvidenceStore
+from .evidence import EDITABLE, EvidenceStore, validate_fields
 from .models import ACTIONABLE_CLASSIFICATIONS
 from .pareto import BALANCED_PERSPECTIVE_ID, is_pareto_candidate, pareto_frontier_keys
 from .report import load_latest
@@ -30,6 +31,9 @@ ASSETS = {
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/decision-app.mjs": ("decision-app.mjs", "text/javascript; charset=utf-8"),
     "/decision-map.mjs": ("decision-map.mjs", "text/javascript; charset=utf-8"),
+    "/pin-history.mjs": ("pin-history.mjs", "text/javascript; charset=utf-8"),
+    "/view-state.mjs": ("view-state.mjs", "text/javascript; charset=utf-8"),
+    "/room-evidence.mjs": ("room-evidence.mjs", "text/javascript; charset=utf-8"),
     "/decision-charts.mjs": ("decision-charts.mjs", "text/javascript; charset=utf-8"),
     "/decision.css": ("decision.css", "text/css; charset=utf-8"),
     "/vendor/leaflet.js": ("vendor/leaflet.js", "text/javascript; charset=utf-8"),
@@ -418,7 +422,7 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
                         self.wfile.write(body)
                 except (ValueError, KeyError, TypeError) as exc:
                     self._json(400, {"error": str(exc)})
-                except (OSError, RuntimeError) as exc:
+                except (OSError, RuntimeError, sqlite3.Error) as exc:
                     self._json(503, {"error": str(exc)})
                 return
             if path == "/api/report":
@@ -436,7 +440,7 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, payload)
                 except ValueError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                except (OSError, RuntimeError) as exc:
+                except (OSError, RuntimeError, sqlite3.Error) as exc:
                     self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
                 return
             asset = ASSETS.get(path)
@@ -454,7 +458,7 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
-            if path in {"/api/preferences", "/api/evidence", "/api/import"}:
+            if path in {"/api/preferences", "/api/evidence", "/api/import", "/api/routes"}:
                 if not self._valid_local_request() or self.headers.get("X-Japan-Housing") != "1":
                     self._json(403, {"error": "local dashboard request required"})
                     return
@@ -466,26 +470,30 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
                     if not 0 < length <= 65536:
                         raise ValueError("request exceeds the 64 KiB limit")
                     payload = json.loads(self.rfile.read(length))
+                    if not isinstance(payload, dict):
+                        raise ValueError("request must be a JSON object")
                     if path == "/api/preferences":
                         self._json(200, decisions.save(payload))
+                    elif path == "/api/routes":
+                        self._json(200, decisions.fetch_routes(payload.get("stable_key", "")))
                     else:
                         with decisions.lock:
                             with EvidenceStore(config.runtime.state_path) as evidence:
                                 if path == "/api/evidence":
                                     key = payload.get("stable_key", "")
                                     current = decisions.detail(key)
-                                    from .evidence import validate_fields
-
-                                    validate_fields(
-                                        {
-                                            **{
-                                                k: v
-                                                for k, v in current.items()
-                                                if k in payload.get("values", {})
-                                            },
-                                            **payload.get("values", {}),
-                                        }
-                                    )
+                                    validate_fields(payload.get("values"))
+                                    if payload.get("kind") != "estimate":
+                                        validate_fields(
+                                            {
+                                                **{
+                                                    k: v
+                                                    for k, v in current.items()
+                                                    if k in EDITABLE
+                                                },
+                                                **payload["values"],
+                                            }
+                                        )
                                     evidence.add(key, payload)
                                 else:
                                     key = evidence.import_record(payload)
@@ -493,7 +501,7 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
                         self._json(200, {"stable_key": key})
                 except (ValueError, KeyError, TypeError) as exc:
                     self._json(400, {"error": str(exc)})
-                except (OSError, RuntimeError) as exc:
+                except (OSError, RuntimeError, sqlite3.Error) as exc:
                     self._json(503, {"error": str(exc)})
                 return
             if urlparse(self.path).path != "/api/decisions":

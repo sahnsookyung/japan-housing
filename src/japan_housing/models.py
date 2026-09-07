@@ -13,9 +13,12 @@ ACTIONABLE_CLASSIFICATIONS = frozenset({"eligible", "review"})
 SourceStatus = Literal["healthy", "partial", "failed", "drifted"]
 HOUSING_RECORD_SCHEMA_VERSION = 12
 SOURCE_RECORD_SCHEMA_VERSIONS = {
-    "best_estate": 13,
-    "oakhouse": 11,
-    "wagaya": 14,
+    "best_estate": 14,
+    "oakhouse": 12,
+    "wagaya": 15,
+    "modern_living": 13,
+    "gg_house": 13,
+    "tokyo_sharehouse": 13,
 }
 
 
@@ -115,6 +118,13 @@ class HousingRecord:
     screening_days: int | None = None
     extension_available: bool | None = None
     transfer_fee_yen: int | None = None
+    air_conditioning: bool | None = None
+    natural_light: bool | None = None
+    internet_latency_ms: float | None = None
+    night_noise_db: float | None = None
+    flood_depth_m: float | None = None
+    building_year: int | None = None
+    emergency_contact_requirement: str = ""
     metrics_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

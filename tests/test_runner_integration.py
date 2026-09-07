@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -446,8 +447,11 @@ def test_full_refresh_promotes_records_and_publishes_report(
     assert outcome.report.job_count == 3
     assert outcome.report.json_path.exists()
     markdown = outcome.report.markdown_path.read_text(encoding="utf-8")
-    assert "Available-room monthly price: ¥77,000" in markdown
-    assert "Property advertised monthly from: ¥68,000" in markdown
+    assert "Saved decision scenario" in markdown
+    payload = json.loads(outcome.report.json_path.read_text())
+    assert any(r["recurring_total_yen"] == 77000 for r in payload["housing"])
+    assert any(r["advertised_monthly_from_yen"] == 68000 for r in payload["housing"])
+    assert "cash_before_keys_yen" in payload["housing"][0]["scenario"]
     assert (runtime.artifacts_path / "latest.json").exists()
     assert route_forces == [False]
 

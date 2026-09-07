@@ -15,9 +15,18 @@ def _amount(pattern: str, text: str) -> int | None:
     return int(match.group(1).replace(",", "")) if match else None
 
 
-def parse_share_source(ref: ListingRef, label: str, document: str) -> list[HousingRecord]:
+def parse_share_source(
+    ref: ListingRef, label: str, document: str, supplemental_document: str | None = None
+) -> list[HousingRecord]:
     # Imported here to keep the existing parser helpers the single implementation.
-    from .parsing import _coordinates, _date, _prefecture, _record, _structured_objects
+    from .parsing import (
+        _coordinates,
+        _date,
+        _housing_type,
+        _prefecture,
+        _record,
+        _structured_objects,
+    )
 
     text = visible_text(document)
     name = title(document).split(":TOKYO")[0].split(" | ")[0]
@@ -38,7 +47,8 @@ def parse_share_source(ref: ListingRef, label: str, document: str) -> list[Housi
     result = []
     if ref.source_id == "modern_living":
         for data in _structured_objects(document):
-            if "Room" not in str(data.get("@type")):
+            types = str(data.get("@type"))
+            if "Room" not in types and "Apartment" not in types:
                 continue
             offer = data.get("offers", {})
             if not isinstance(offer, dict) or offer.get("url", data.get("url")) != ref.url:
@@ -53,7 +63,21 @@ def parse_share_source(ref: ListingRef, label: str, document: str) -> list[Housi
             available = str(offer.get("availability", "")).endswith("InStock")
             availability_date = _date(str(offer.get("availabilityStarts", "")))
             area = data.get("floorSize", {}).get("value")
+            geo = data.get("geo", {})
+            coordinates = (geo.get("latitude"), geo.get("longitude"))
+            valid_coordinates = (
+                all(isinstance(v, int | float) and not isinstance(v, bool) for v in coordinates)
+                and 20 <= coordinates[0] <= 46
+                and 122 <= coordinates[1] <= 154
+            )
             common.update(
+                latitude=coordinates[0] if valid_coordinates else None,
+                longitude=coordinates[1] if valid_coordinates else None,
+                coordinate_basis="exact_room_schema" if valid_coordinates else "unknown",
+                housing_type="private_room"
+                if "Room" in types
+                else _housing_type(str(data.get("description", ""))),
+                address=str(address.get("streetAddress", "")),
                 prefecture=_prefecture(str(address.get("addressRegion", ""))),
                 city=str(address.get("addressLocality", "")),
             )
@@ -66,7 +90,9 @@ def parse_share_source(ref: ListingRef, label: str, document: str) -> list[Housi
                     title=str(data["name"]),
                     unit_name=unit.group(1),
                     rent_yen=rent,
-                    room_area_m2=float(area) if isinstance(area, int | float) else None,
+                    room_area_m2=float(area)
+                    if isinstance(area, int | float) and area > 0
+                    else None,
                     private_space=True,
                     furnished=True,
                     recurring_total_yen=None,
@@ -89,6 +115,13 @@ def parse_share_source(ref: ListingRef, label: str, document: str) -> list[Housi
                 )
             )
     elif ref.source_id == "gg_house":
+        coordinates = re.search(r"const LAT = ([\d.]+); const LNG = ([\d.]+);", document)
+        if coordinates:
+            lat, lon = map(float, coordinates.groups())
+            if 20 <= lat <= 46 and 122 <= lon <= 154:
+                common.update(
+                    latitude=lat, longitude=lon, coordinate_basis="provider_map_area_approximation"
+                )
         admin = _amount(r"Administrative fee\s*([\d,]+)\s*JPY", text)
         departure_fee = _amount(r"Cancellation fee\s*([\d,]+)\s*JPY", text)
         zero_deposit = bool(re.search(r"Key money / Deposit\s*0month / 0month", text))
@@ -151,18 +184,29 @@ def parse_share_source(ref: ListingRef, label: str, document: str) -> list[Housi
                     foreigner_evidence=("Operator publishes multilingual application information",),
                     source_evidence=(
                         row,
-                        "Published fixed-term agreement; confirm registration, applicant "
-                        "screening and notice",
+                        (
+                            "Published fixed-term agreement; confirm registration, "
+                            "applicant screening and notice"
+                        ),
                     ),
                 )
             )
     elif ref.source_id == "tokyo_sharehouse":
         minimum = _amount(r"Min Contract\s*(\d+)\s*Months", text)
-        common["address"] = (
-            re.search(r"Area\n([^\n]+)", text).group(1)
-            if re.search(r"Area\n([^\n]+)", text)
-            else ""
-        )
+        address = re.search(r"OUTLINE\s+MAP\s+VIEW\s+Area\n([^\n]+)", text)
+        common["address"] = address.group(1) if address else ""
+        if supplemental_document:
+            point = re.search(
+                r"new google\.maps\.LatLng\(([\d.]+),\s*([\d.]+)\)", supplemental_document
+            )
+            if point:
+                lat, lon = map(float, point.groups())
+                if 20 <= lat <= 46 and 122 <= lon <= 154:
+                    common.update(
+                        latitude=lat,
+                        longitude=lon,
+                        coordinate_basis="provider_map_area_approximation",
+                    )
         common["city"] = (
             re.search(r"([\w-]+-ku)", common["address"]).group(1)
             if re.search(r"([\w-]+-ku)", common["address"])
@@ -188,7 +232,9 @@ def parse_share_source(ref: ListingRef, label: str, document: str) -> list[Housi
                     external_id=f"{ref.external_id}:{room.group(1)}",
                     title=f"{name} · {room.group(1)}",
                     unit_name=room.group(1),
-                    room_area_m2=float(area.group(1)) if area else None,
+                    room_area_m2=float(area.group(1))
+                    if area and float(area.group(1)) > 0
+                    else None,
                     floor=_amount(r"\b(\d+)F\b", row),
                     private_space="Private" in row,
                     furnished="bed-on" in body,
@@ -259,6 +305,13 @@ def gg_campaign(document: str, ref: ListingRef, record: HousingRecord) -> dict[s
 
 SOURCE_CATALOG = (
     {
+        "id": "google_routes",
+        "label": "Google Routes",
+        "url": "https://developers.google.com/maps/documentation/routes",
+        "mode": "routing",
+        "purpose": "Transit matrix for saved pins; GOOGLE_ROUTES_API_KEY required",
+    },
+    {
         "id": "modern_living",
         "label": "Modern Living",
         "url": "https://modernlivingjapan.com/en/properties",
@@ -313,8 +366,8 @@ SOURCE_CATALOG = (
         "id": "navitime",
         "label": "NAVITIME",
         "url": "https://api-sdk.navitime.co.jp/api/",
-        "mode": "routing",
-        "purpose": "Japan transit, fares and transfers; provider credentials required",
+        "mode": "reviewed_import",
+        "purpose": "Japan transit, fares and transfers; reviewed evidence import, no API adapter",
     },
     {
         "id": "ekispert",

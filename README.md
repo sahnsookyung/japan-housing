@@ -1,61 +1,94 @@
 # Japan Housing
 
-`japan-housing` is a bounded, incremental personal monitor for foreigner-friendly Greater Tokyo
-housing. It keeps two ranked tracks for one working-holiday resident:
+A local decision desk for choosing a landing room while the eventual job location is uncertain.
+The saved scenario defaults to **10 September–10 November 2026**, **¥85,000 effective monthly
+expense**, and **85% price / 15% observed transit time**. Dates, stay length, region, budget,
+room-size requirements, cash limit, weights, and destinations are editable in the dashboard.
 
-- a furnished, address-registerable landing room for **15–28 September 2026**, normally for one to
-  three months; and
-- a lower-cost long-term private room or 1R/1K comparison.
+- **Map and pins:** add a location by clicking the map, drag it to move it, or enter coordinates.
+  Dragging previews a change; confirm it or cancel (Escape also cancels). Editing an existing
+  pin's coordinates in the form also requires confirmation. Neither action starts a listing scan
+  or route request. **Undo last pin change** restores coordinates and confirmation status; the
+  last 20 committed changes survive reloads in this browser's local storage. Other settings stay
+  as currently saved. Undo history begins with changes made after this feature was installed.
+  Rename, disable, remove/undo, and weight up to 20 destinations. Locations and settings survive
+  reloads in `state/decision-preferences.json`. Initial employment pins are area approximations.
+  Remote roles, undisclosed offices, optional Kichijoji, and Osaka relocation stay distinct.
+- **Expense versus liquidity:** calendar-aware costs separate nonrefundable fees, refundable
+  deposits, cash before keys, exit charges and conditional campaigns. Move-out is exclusive.
+  Compare equal stays of one, two or three months and monthly anniversary curves through one year.
+  Unknown fees remain explicit. Incomplete totals are modeled known floors, never firm quotes.
+  `calendar_daily` billing uses actual calendar days; otherwise costs use move-in anniversaries.
+  An unknown partial-month billing rule is flagged and must be confirmed for exact dates.
+- **Evidence before ranking:** hard failures and stale vacancy evidence are separate from rooms
+  needing confirmation. Missing routes never become invented minutes. A weighted score and the
+  cost/commute frontier require complete costs and observed routes to every enabled, confirmed
+  office pin. The default order groups evidence tiers. Explicit expense, cash, space, transit and
+  geographic sorts use that metric across tiers, with missing values last. The default potential
+  matches view omits reserved/dismissed rooms; their decision filters and All inventory retain access.
+  Housing regions can be Greater Tokyo, Kansai, or all stored Japanese regions.
+- **Pareto frontier:** the named tab plots all potential matches with a known stay-expense minimum
+  and the selected location metric, including rooms that still need confirmation. Hollow amber
+  points are provisional; missing fees make their plotted price a lower bound, not a firm quote.
+  Filled points have complete cost/eligibility evidence. Green highlights and the frontier line
+  compare only complete cases; provisional rooms cannot establish verified dominance. A highlighted room
+  is not a proven winner over unverified alternatives. The chart is independent of table pagination;
+  expandable lists expose overlapping points and rooms without a point, with missing-data reasons.
+  Geographic distance uses Haversine great-circle
+  distance (Earth radius 6,371.0088 km) from the room pin to each enabled office pin, weighted by
+  destination priority. It is explicitly an estimate, particularly for area pins, and does not
+  infer walking/rail time or change transit-based ranking. Remote, undisclosed and relocation
+  destinations are excluded. Frontier highlights require contract eligibility and complete expenses;
+  transit highlights also require confirmed endpoints and fresh routes. Transit points require
+  observations for every enabled office; incomplete destination averages are not plotted.
+  Hard exclusions, stale rooms, reserved rooms and dismissed rooms stay outside both charts.
+  The 85:15 price preference
+  does not determine Pareto dominance. Coverage counts explain empty or small frontiers.
+  Solid green steps draw the complete-case dominance boundary even for a single point. Dashed
+  amber steps show the provisional frontier using currently plotted values; missing fees can
+  change it. Steps do not imply interpolated offers. Chart hover/focus and map-pin hover display
+  property names; chart tooltips also include cost, location and evidence status.
+- **Decision metrics:** room and usable area, desk, air conditioning, light, measured internet
+  speed/latency and noise, facilities per resident, flood-map depth and building year, screening
+  lead time, registration, emergency contacts, notice deadlines, extension/transfer terms, cash
+  buffer, fares, weekly travel time and worst observed commute. Unobserved values stay unverified.
+  Property-level evidence is distinguished from room-level confirmations in the provenance view.
+- **Linked views:** table, map, comparisons, JSON/CSV exports and generated reports use the same
+  scenario model. Source coverage shows current/stale records and partial collection states.
+  Identity matches flag possible duplicates without silently merging differently identified rooms.
+- **View statistics:** filtered potential matches have separate distributions for complete
+  monthly expenses and incomplete known minimums, plus room area and complete cash before keys.
+  Medians, observed ranges, sample sizes, unknown counts and recurring cost questions are explicit.
+  These describe collected listings, not unique leases or an unbiased market sample. Inventory
+  evidence totals are a separate collapsible summary before search filters.
+- **Everyday controls:** stay setup is collapsible with an unapplied-edit indicator and Revert.
+  Reloading the snapshot or saving a location preserves the scenario draft. Search, filters,
+  sorting, chart metric, tab and page persist in the URL; comparison selections persist in this
+  tab's session storage. A floating tray lets you remove rooms, clear, or jump to the comparison.
+  Phone layouts expose every room metric and comparison control without horizontal scrolling.
+- **Reviewed facts:** room details provide regular fields for fees, deposit/refund, prepaid rent,
+  area, minimum stay, notice, billing and desk evidence. Blank retains the existing fact; explicit
+  zero records a confirmed zero. Cost questions are resolved individually with a source URL and
+  note. Advanced JSON remains available for other facts and estimates.
 
-The configured recurring-cost ceiling is **¥80,000**, including every known mandatory monthly fee.
-Unknown charges are never treated as zero. Listings with unresolved hard requirements such as
-registration, foreigner acceptance, or private-space evidence remain visible as `unverified` under
-the configured `strict_evidence` policy. A strict search retains but excludes listings that cannot
-prove availability for the move-in window. Incomplete one-time costs remain prominent cautions;
-they do not undo an otherwise verified recurring-budget decision, but they make the cost scenario
-incomplete and bar the listing from Pareto comparison. Turning strict evidence off maps unresolved
-hard requirements to the diagnostic manual-review tier.
+Transit requests from room details use Google Routes and the saved coordinates, with at most
+20 destination elements per request. Set `GOOGLE_ROUTES_API_KEY` in the environment or the
+project `.env`. Only transit is required for these requests. The configured departure is Tuesday
+08:30 Asia/Tokyo. Routes are cached for seven days (configurable); changing an endpoint makes its
+old route inapplicable but does not erase it. Up to 60 endpoint/schedule observations per room are
+retained in the projected route history, including reviewed routes. Undo reuses matching routes
+while fresh; other destinations are unaffected. Manually reviewed routes can include fares, transfers,
+walking time and a dated source link. NAVITIME and Ekispert currently support reviewed evidence
+imports, **not automatic API adapters**. Map tiles use ordinary OpenStreetMap viewing with visible
+attribution; Leaflet 1.9.4 is bundled locally under its BSD license.
 
-Within each eligibility, registration, and cost-evidence tier, priority is a lower-is-better score:
+The older TOML collector policy and `commutes` command retain their three-station diagnostic
+configuration for compatibility. They do not replace the dashboard's saved destinations or its
+scenario ranking. Raw report JSON retains those diagnostic fields alongside explicit `scenario`,
+`scenario_status`, `route_metrics`, and `scenario_priority_score` fields. Markdown and CSV reports
+present the saved decision scenario.
 
-```text
-100 × (0.60 × ranking monthly price / ¥80,000
-     + 0.10 × straight-line distance to the Kichijoji–Shibuya–Shinjuku midpoint / 20 km
-     + 0.20 × scored mean public-transit time to the three stations / 45 minutes
-     + 0.10 × scored mean bicycle time to the three stations / 45 minutes)
-```
-
-For complete cost evidence, ranking price spreads initial and exit costs over three months for the
-landing track and twelve months for the long-term track. Incomplete totals remain in a lower
-evidence tier and use the effective monthly floor from every verified recurring, entry, and exit
-component; unknown charges are labeled and never imputed. The dashboard also offers closer
-(40/60 price/location), balanced (60/40), cheaper (80/20), and
-Pareto-frontier views. The default frontier minimizes effective monthly price against a balanced
-location-burden axis built from midpoint distance plus mean transit/bus and bicycle time across all
-three commute anchors. The dashboard can switch to an independent Kichijoji, Shibuya, or Shinjuku
-frontier; each anchor view uses distance and route times to that station only. Only eligible,
-still-actionable homes with complete cost scenarios compete, and landing and long-term tracks
-remain separate so one contract type cannot hide useful choices in another.
-
-Distance is calculated from provider-published coordinates to the arithmetic geographic centroid
-of Kichijoji, Shibuya, and Shinjuku stations (`35.6840741, 139.6604630`). Actual public-transit
-(train, subway, and bus) and human-powered bicycle routes are queried separately to each station
-through Google Routes, then averaged. The representative transit departure is Tuesday at 08:30
-Japan time. Coordinates inconsistent with the stated prefecture are rejected. Missing coordinates
-are scored as 30 km; missing transit or bicycle routes are scored as 90 minutes. Distances above
-50 km are excluded by default. All weights, references, route anchors, schedule, and penalties are
-configurable in `config/profile.toml`.
-
-Route values are never inferred from straight-line distance. When only some station routes exist,
-reports show both the observed-route mean and the all-anchor ranking mean; the latter includes the
-configured 90-minute penalty for every missing route. Google documents bicycle routing as beta, so
-every UI/report includes a route-safety warning. Route results are cached for seven days; changing
-the configured transit weekday, time, or timezone invalidates transit rows without discarding valid
-bicycle rows. The matrix run is capped at 900 billable origin-destination-mode elements and batches
-at most 90 transit elements per request, below Google's 100-element transit limit.
-
-This is an advisory personal search tool. Confirm the lease, residence-registration eligibility,
-full fees, vacancy, and applicant screening directly with the provider before paying.
+Confirm exact-room availability, registration, fees and screening with the operator before booking.
 
 ## Setup
 
@@ -71,22 +104,32 @@ uv run japan-housing report
 uv run japan-housing dashboard
 ```
 
-The `japan-housing` dashboard binds only to <http://127.0.0.1:8766>. Its decision-desk interface
-filters the latest report, compares up to three listings, charts effective monthly price against
-normalized location burden, switches among balanced and per-station Pareto frontiers, and
-recomputes the selected frontier after every filter. Filtering, sorting, and bounded pagination
-run against one cached immutable report snapshot; the browser receives at most 200 table rows per
-request plus a compact set of eligible chart points. It persists
-`shortlisted`, `contacted`, `application_started`, `reserved`, and `not_interested` decisions in
-local SQLite state. Missing route evidence remains visible and retains the configured ranking
-penalties; the UI never presents a penalized route as observed.
+The dashboard binds only to <http://127.0.0.1:8766>. Filtering and sorting use a cached immutable
+projection, with 50 table rows per page (API maximum 200), at most 500 map location groups, and
+at most 1,000 chart points. Search is debounced and obsolete requests are canceled. The frontier
+uses an O(n log n) sweep. Saved scenarios, pins, reviewed room facts and listing decisions remain
+local; changing filters never scrapes websites or requests paid routes.
+Only the active map/chart renders; pagination retains the existing visualization. Comparison
+requests are canceled when selection changes, and matching comparisons reuse their rendered data.
+Pure calendar calculations and policy hashes have bounded caches. Departure scenarios are computed
+on demand for details, comparison and full JSON exports. Table responses omit per-office route
+details. See [UI and performance audit](docs/ui-audit-2026-09-08.md) for measured results and checks.
 
-Search dates, budget, housing types, priority weights, midpoint anchor, and runtime bounds live in
-`config/profile.toml`. Runtime state and generated artifacts are ignored by Git.
+`config/profile.toml` controls collector scope, request budgets, and legacy diagnostics. The
+saved dashboard scenario controls the decision desk. Runtime state and artifacts are ignored by Git.
 
 ## Sources and coverage
 
 The automated registry uses public, robots-permitted entry points only:
+
+- **Modern Living** — room/apartment JSON-LD, exact unit identity, room area, availability and
+  scoped property coordinates. Mandatory fees require an operator quote when not published.
+- **GG House / Tokyo β** — curated research targets and linked inventory, reconciled room rent
+  plus common charges, departure fees, and dated campaign evidence. Campaign discounts apply
+  only after room/customer eligibility is confirmed. Published map positions may be approximate.
+- **Tokyo Sharehouse** — room-level inventory and facility icons, with linked property maps.
+  Conflicting administration/deposit wording is retained as unresolved rather than counted twice.
+
 
 - **Oakhouse** — primary furnished/monthly landing source. Its public house index is crawled, and
   each available room is normalized independently. The index keeps discovery below the global
@@ -250,3 +293,44 @@ uv run japan-housing benchmark --fixtures tests/fixtures
 
 Tests use local HTML fixtures and mocked HTTP. `doctor` is the only normal live contract check and
 does not write housing state.
+
+## Reviewed sources and evidence
+
+Shares, XROSS HOUSE, Hituji, FRESHROOM, Sakura House, Borderless, GaijinPot, Leopalace and UR
+are visible in source coverage; they are not all automated feeds. Shares' robots check was
+unavailable/disallowed during the audit, so collection was not bypassed. A healthy source means
+its configured discovery completed; it does not establish exhaustive market coverage. Budgeted
+partial sources resume from their cursors. Shortlisted, contacted, and reserved rooms can be
+reviewed independently of discovery, with evidence recorded in room details.
+
+Use **Import reviewed listing** for a JSON object with `record`, `kind` (`published`, `confirmed`,
+or `estimate`), `source_url`, and `note`. The record requires `source_id`, `source_label`,
+`external_id`, `title`, and an HTTPS `url`. Optional fields follow `HousingRecord` in
+`src/japan_housing/models.py`. Import validation completes before the transaction writes anything.
+Estimates are stored separately and never overwrite confirmed values. Existing records retain
+unspecified facts. Room facts can be amended in the detail panel with the source and review note.
+
+Route evidence in `metrics_evidence.routes` requires a destination ID, exact origin and destination
+coordinates, positive `minutes`, `verified_at`, and an HTTPS `source_url`. `fare_yen`, `transfers`,
+`walking_minutes` and `last_return` are optional. Office attendance is user input, not inferred
+from a job title. Fare projections assume the entered monthly commute days and no reimbursement;
+weekly travel time is weighted across alternative offers, not summed as if all jobs were held.
+
+Audit correction: three months at ¥44,000 is **¥132,000**, only **¥4,000** less than a ¥136,000
+two-month stay. Those are different horizons; the comparison view uses equal stay periods.
+The previously recommended Nakano I #104 was occupied with tentative December availability
+when rechecked on 7 September. Its earlier recommendation is not a current vacancy guarantee.
+
+## Decision-desk validation
+
+```bash
+.venv/bin/pytest -ra
+.venv/bin/ruff check src tests
+node --test tests/*.mjs
+```
+
+Browser checks cover drop pins, drag confirmation/cancellation, undo after reload, persistence,
+both Pareto views, scenario changes, equal-period comparison,
+room details and the 390px layout. API tests cover loopback write protection, input validation,
+atomic imports, field provenance, exports and route invalidation. Live provider requests remain
+unverified without credentials; mocked matrix tests verify exact endpoints and transit-only requests.

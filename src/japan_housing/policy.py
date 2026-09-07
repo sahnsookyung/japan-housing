@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
+from functools import lru_cache
 from math import asin, cos, radians, sin, sqrt
 
 from .config import RankingConfig, RoutingConfig, SearchProfile
@@ -43,6 +44,7 @@ def straight_line_distance_km(
     return 2 * 6371.0088 * asin(sqrt(min(1.0, haversine)))
 
 
+@lru_cache(maxsize=128)
 def policy_config_hash(
     profile: SearchProfile,
     ranking: RankingConfig,

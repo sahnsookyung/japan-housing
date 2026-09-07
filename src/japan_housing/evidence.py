@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -27,6 +28,8 @@ EDITABLE = RECORD_FIELDS - {
 }
 MONEY_FIELDS = {k for k in EDITABLE if k.endswith("_yen")}
 BOOL_FIELDS = {
+    "air_conditioning",
+    "natural_light",
     "private_space",
     "furnished",
     "deposit_in_initial_cost",
@@ -34,6 +37,7 @@ BOOL_FIELDS = {
     "extension_available",
 }
 INT_FIELDS = {
+    "building_year",
     "minimum_stay_days",
     "maximum_stay_days",
     "minimum_stay_months",
@@ -49,6 +53,9 @@ INT_FIELDS = {
     "walk_minutes_min",
 }
 NUMERIC_FIELDS = {
+    "internet_latency_ms",
+    "night_noise_db",
+    "flood_depth_m",
     "room_area_m2",
     "usable_area_m2",
     "internet_download_mbps",
@@ -73,6 +80,12 @@ def validate_fields(values: object) -> dict[str, Any]:
         raise ValueError("unsupported evidence fields")
     for key, value in values.items():
         if value is None:
+            if key == "deposit_in_initial_cost":
+                raise ValueError("deposit_in_initial_cost must be boolean")
+            if key not in MONEY_FIELDS | INT_FIELDS | NUMERIC_FIELDS | BOOL_FIELDS | {
+                "available_from"
+            }:
+                raise ValueError(f"{key} cannot be null")
             continue
         if key in MONEY_FIELDS | INT_FIELDS:
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100000000:
@@ -110,7 +123,7 @@ def validate_fields(values: object) -> dict[str, Any]:
         elif key == "campaign":
             validate_campaign(value)
         elif key == "metrics_evidence":
-            if not isinstance(value, dict) or len(json.dumps(value)) > 20000:
+            if not isinstance(value, dict) or len(json.dumps(value, allow_nan=False)) > 20000:
                 raise ValueError("metric evidence must be a bounded object")
             validate_routes(value.get("routes", []))
         elif not isinstance(value, str) or len(value) > 4000:
@@ -121,6 +134,17 @@ def validate_fields(values: object) -> dict[str, Any]:
         and values["refundable_deposit_yen"] > values["deposit_yen"]
     ):
         raise ValueError("deposit refund cannot exceed the deposit paid")
+    bounds = {
+        "minimum_stay_months": 1200,
+        "early_exit_before_months": 1200,
+        "upfront_rent_months": 36,
+        "notice_days": 3650,
+        "minimum_stay_days": 36500,
+        "maximum_stay_days": 36500,
+    }
+    for key, high in bounds.items():
+        if values.get(key) is not None and values[key] > high:
+            raise ValueError(f"{key} exceeds the supported range")
     if values.get("billing_basis", "unknown") not in {"unknown", "calendar_daily", "anniversary"}:
         raise ValueError("billing basis is unsupported")
     return values
@@ -164,6 +188,27 @@ def validate_campaign(campaign: object) -> None:
         raise ValueError("campaign requires move-in dates and minimum_months") from exc
 
 
+def merge_route_history(existing: list, incoming: list) -> list:
+    """Retain up to 60 endpoint/schedule observations so reverting pins can reuse them."""
+    fields = (
+        "destination_id",
+        "destination_latitude",
+        "destination_longitude",
+        "origin_latitude",
+        "origin_longitude",
+        "schedule_key",
+    )
+    result, seen = [], set()
+    for route in [*incoming, *existing]:
+        key = json.dumps([route.get(field) for field in fields], sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            result.append(route)
+        if len(result) == 60:
+            break
+    return result
+
+
 def validate_routes(routes: object) -> None:
     if not isinstance(routes, list) or len(routes) > 60:
         raise ValueError("routes must contain at most 60 entries")
@@ -182,7 +227,23 @@ def validate_routes(routes: object) -> None:
         )
         if any(key not in route for key in required):
             raise ValueError("route requires exact endpoints, minutes, date and source URL")
+        if "schedule_key" in route and (
+            not isinstance(route["schedule_key"], str) or len(route["schedule_key"]) > 100
+        ):
+            raise ValueError("route schedule key is invalid")
         _safe_url(route["source_url"])
+        if (
+            not isinstance(route["destination_id"], str)
+            or not 0 < len(route["destination_id"]) <= 80
+        ):
+            raise ValueError("route destination ID is invalid")
+        minutes = route["minutes"]
+        if (
+            isinstance(minutes, bool)
+            or not isinstance(minutes, int | float)
+            or not 0 < minutes <= 1440
+        ):
+            raise ValueError("route minutes must be positive and at most 1440")
         for key in ("minutes", "fare_yen", "transfers", "walking_minutes"):
             value = route.get(key)
             if value is not None and (
@@ -238,7 +299,8 @@ class EvidenceStore:
             "SELECT COALESCE(MAX(id),0) FROM decision_evidence"
         ).fetchone()[0]
 
-    def add(self, key: str, payload: object) -> None:
+    @staticmethod
+    def prepare(payload: object) -> dict[str, Any]:
         if not isinstance(payload, dict) or len(json.dumps(payload)) > 50000:
             raise ValueError("evidence payload is invalid or too large")
         values = validate_fields(payload.get("values"))
@@ -257,6 +319,10 @@ class EvidenceStore:
             "observed_at": iso_now(),
             "scope": "room",
         }
+        return item
+
+    def add(self, key: str, payload: object) -> None:
+        item = self.prepare(payload)
         with self.connection:
             self.connection.execute(
                 "INSERT INTO decision_evidence(stable_key,payload,created_at) VALUES (?,?,?)",
@@ -275,43 +341,61 @@ class EvidenceStore:
         }
         if any(not v or len(v) > 300 for v in identity.values()):
             raise ValueError("import requires source_id, source_label, external_id and title")
+        if (
+            not re.fullmatch(r"[a-z0-9_]{1,80}", identity["source_id"])
+            or ":" in identity["external_id"]
+        ):
+            raise ValueError("use a lowercase source ID and an external ID without colons")
         values = validate_fields({k: v for k, v in raw.items() if k in EDITABLE})
-        # Plain imported narrative starts unverified. Structured, reviewed values carry provenance.
-        record = HousingRecord(schema_version=1, url=url, **identity)
-        for key, value in values.items():
-            setattr(record, key, value)
-        record.observed_at = record.detail_verified_at = iso_now()
-        key = record.stable_key
-        with self.connection:
-            self.connection.execute(
-                "INSERT INTO decision_imports VALUES (?,?) "
-                "ON CONFLICT(stable_key) DO UPDATE SET record_json=excluded.record_json",
-                (key, json.dumps(record.to_dict())),
-            )
-        self.add(
-            key,
+        if values.get("refundable_deposit_yen") is not None and values.get("deposit_yen") is None:
+            raise ValueError("an imported refund requires the deposit amount")
+        evidence = self.prepare(
             {
                 "values": values,
                 "source_url": payload.get("source_url", url),
                 "kind": payload.get("kind", "published"),
                 "note": payload.get("note", "Reviewed import"),
-            },
+            }
         )
+        # Plain imported narrative starts unverified. Structured, reviewed values carry provenance.
+        record = HousingRecord(schema_version=1, url=url, **identity)
+        record.observed_at = record.detail_verified_at = iso_now()
+        key = record.stable_key
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO decision_imports VALUES (?,?) ON CONFLICT(stable_key) "
+                "DO UPDATE SET record_json=excluded.record_json",
+                (key, json.dumps(record.to_dict())),
+            )
+            self.connection.execute(
+                "INSERT INTO decision_evidence(stable_key,payload,created_at) VALUES (?,?,?)",
+                (key, json.dumps(evidence), iso_now()),
+            )
         return key
 
     def merge(self, originals: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        records = {item["stable_key"]: dict(item) for item in originals}
+        records = {
+            item["stable_key"]: {
+                **item,
+                "field_evidence": dict(item.get("field_evidence", {})),
+                "estimated_fields": dict(item.get("estimated_fields", {})),
+            }
+            for item in originals
+        }
         for key, raw in self.connection.execute(
             "SELECT stable_key,record_json FROM decision_imports"
         ):
             record = json.loads(raw)
             age = datetime.now().astimezone() - datetime.fromisoformat(record["detail_verified_at"])
-            records[key] = {
-                **record,
-                "stable_key": key,
-                "freshness": "stale" if age.total_seconds() > 72 * 3600 else "current",
-                "decision_status": "new",
-            }
+            records.setdefault(
+                key,
+                {
+                    **record,
+                    "stable_key": key,
+                    "freshness": "stale" if age.total_seconds() > 72 * 3600 else "current",
+                    "decision_status": "new",
+                },
+            )
         for key, raw in self.connection.execute(
             "SELECT stable_key,payload FROM decision_evidence ORDER BY id"
         ):
@@ -321,12 +405,18 @@ class EvidenceStore:
             record = records[key]
             record.setdefault("field_evidence", {})
             for field, value in evidence["values"].items():
-                record["field_evidence"][field] = {
-                    k: v for k, v in evidence.items() if k != "values"
-                }
                 if evidence["kind"] == "estimate":
                     record.setdefault("estimated_fields", {})[field] = value
                 else:
+                    record["field_evidence"][field] = {
+                        k: v for k, v in evidence.items() if k != "values"
+                    }
+                    if field == "metrics_evidence":
+                        previous = record.get(field, {})
+                        value = {**previous, **value}
+                        value["routes"] = merge_route_history(
+                            previous.get("routes", []), value.get("routes", [])
+                        )
                     record[field] = value
             if (
                 evidence["kind"] != "estimate"
@@ -342,4 +432,12 @@ class EvidenceStore:
                     <= 72 * 3600
                     else "stale"
                 )
+        if self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='decisions'").fetchone():
+            for key, status, note, updated in self.connection.execute(
+                "SELECT stable_key,status,note,updated_at FROM decisions"
+            ):
+                if key in records:
+                    records[key].update(
+                        decision_status=status, decision_note=note, decision_updated_at=updated
+                    )
         return list(records.values())

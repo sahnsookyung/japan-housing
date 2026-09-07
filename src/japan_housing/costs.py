@@ -9,16 +9,19 @@ from __future__ import annotations
 import calendar
 from datetime import date, timedelta
 from fractions import Fraction
+from functools import lru_cache
 
 from .models import CostScenario, HousingRecord
 
 
+@lru_cache(maxsize=4096)
 def add_months(day: date, months: int) -> date:
     index = day.year * 12 + day.month - 1 + months
     year, month = divmod(index, 12)
     return date(year, month + 1, min(day.day, calendar.monthrange(year, month + 1)[1]))
 
 
+@lru_cache(maxsize=1024)
 def month_fraction(start: date, end: date, basis: str = "anniversary") -> Fraction:
     """Prorate using actual calendar days, or successive move-in anniversaries."""
     result = Fraction(0)
@@ -90,7 +93,13 @@ def cost_scenario(
     if recurring is None:
         unknown.append("recurring total")
     monthly_total = round((recurring or 0) * factor)
-    ledger.append({"label": "Recurring charges", "amount_yen": monthly_total, "kind": "expense"})
+    ledger.append(
+        {
+            "label": "Recurring charges",
+            "amount_yen": monthly_total if recurring is not None else None,
+            "kind": "expense",
+        }
+    )
 
     initial = record.initial_cost_yen
     if initial is None:
@@ -109,7 +118,13 @@ def cost_scenario(
             entry += deposit - (refund or 0)
     elif refund is not None:
         unknown.append("deposit amount")
-    ledger.append({"label": "Non-refundable entry charges", "amount_yen": entry, "kind": "expense"})
+    ledger.append(
+        {
+            "label": "Non-refundable entry charges",
+            "amount_yen": entry if initial is not None or entry else None,
+            "kind": "expense",
+        }
+    )
     if deposit is not None:
         ledger.append(
             {
@@ -122,7 +137,7 @@ def cost_scenario(
     if exit_fee is None:
         unknown.append("exit cost")
     ledger.append(
-        {"label": "Ordinary departure charges", "amount_yen": exit_fee or 0, "kind": "expense"}
+        {"label": "Ordinary departure charges", "amount_yen": exit_fee, "kind": "expense"}
     )
 
     penalty = 0
@@ -130,6 +145,15 @@ def cost_scenario(
         add_months(start, record.early_exit_before_months)
         if record.early_exit_before_months
         else minimum
+    )
+    confirmed_penalty_boundary = (
+        penalty_boundary
+        if record.early_exit_before_months
+        and (
+            record.early_exit_penalty_yen is not None
+            or record.early_exit_penalty_months is not None
+        )
+        else None
     )
     if penalty_boundary is not None and end < penalty_boundary:
         if record.early_exit_penalty_yen is None and record.early_exit_penalty_months is None:
@@ -156,6 +180,12 @@ def cost_scenario(
             valid_until = date.fromisoformat(campaign["move_in_until"])
             campaign_end = add_months(start, int(campaign["minimum_months"]))
             if valid_from <= start <= valid_until:
+                if campaign.get("early_exit_fixed_yen") or campaign.get(
+                    "early_exit_recurring_months"
+                ):
+                    confirmed_penalty_boundary = max(
+                        confirmed_penalty_boundary or start, campaign_end
+                    )
                 if campaign_end > (minimum or start):
                     minimum = campaign_end
                 if end >= campaign_end:
@@ -188,7 +218,11 @@ def cost_scenario(
         known_total = total
         effective = round(Fraction(total) / normalizer)
     cash_complete = (
-        initial is not None and recurring is not None and record.upfront_rent_months is not None
+        initial is not None
+        and recurring is not None
+        and record.upfront_rent_months is not None
+        and (record.deposit_in_initial_cost or deposit is not None)
+        and not record.unknown_costs
     )
     cash = None
     if initial is not None and recurring is not None:
@@ -219,9 +253,7 @@ def cost_scenario(
         upper,
         eligible,
         tuple(reasons),
-        max(d for d in (minimum, penalty_boundary) if d is not None).isoformat()
-        if (minimum or penalty_boundary) and move_in
-        else "",
+        confirmed_penalty_boundary.isoformat() if confirmed_penalty_boundary and move_in else "",
         deadline.isoformat() if deadline and move_in else "",
         discount,
         penalty,
