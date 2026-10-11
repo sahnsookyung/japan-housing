@@ -15,6 +15,7 @@ test("view links round trip search punctuation, filters, metric and page", () =>
     status: "all",
     sort: "distance",
     decision: "shortlisted",
+    destination: "custom & office / 中野",
     metric: "transit",
     view: "chart",
     offset: 50,
@@ -29,6 +30,7 @@ test("invalid URL values fall back without reaching the API", () => {
   assert.equal(view.query.length, 200);
   assert.deepEqual({ ...view, query: "" }, defaultView);
   assert.equal(readViewState("?offset=1.5").offset, 0);
+  assert.equal(readViewState(`?destination=${"a".repeat(81)}`).destination, "");
 });
 test("comparison selections survive reload, reject malformed values and remain bounded", () => {
   let saved;

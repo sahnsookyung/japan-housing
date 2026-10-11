@@ -95,9 +95,14 @@ export function tradeoffChart(container, data, onRoom) {
     container.replaceChildren();
     const p = document.createElement("p");
     p.className = "empty";
-    p.textContent = distance
-      ? "No potential matches currently have both a known cost minimum and coordinates for every enabled office. Rooms without a point are listed below with the missing data."
-      : "No potential matches currently have observed routes to every enabled office. Rooms without a point are listed below. Choose Straight-line distance above to inspect geographic trade-offs without a routing API.";
+    const hasDestinations = data.preferences?.destinations.some(
+      (d) => d.enabled && d.kind === "office" && d.office_days_per_week !== 0,
+    );
+    p.textContent = hasDestinations === false
+      ? "Add or enable an office commute location above to compare cost against distance or transit. Room lists remain available without a destination."
+      : distance
+      ? "No potential matches currently have both a known cost minimum and coordinates for every compared location. Rooms without a point are listed below with the missing data."
+      : "No potential matches currently have observed routes to every compared location. Rooms without a point are listed below. Choose Straight-line distance above to inspect geographic trade-offs without a routing API.";
     container.append(p);
     return;
   }
@@ -133,7 +138,7 @@ export function tradeoffChart(container, data, onRoom) {
           "pointer-events": "none",
           "aria-label":
             kind === "complete"
-              ? "Dominance boundary among complete cases"
+              ? "Frontier among rooms meeting requirements with complete costs and location data"
               : "Provisional frontier using plotted values; missing fees can change this boundary",
         }),
       );
@@ -148,7 +153,7 @@ export function tradeoffChart(container, data, onRoom) {
     const evidenceLabel = p.provisional
       ? `Needs confirmation${p.unknown_costs?.length ? `: ${p.unknown_costs.join("; ")}` : ""}${!distance && !p.endpoints_confirmed ? "; route endpoints unconfirmed" : ""}`
       : "Complete expenses and eligibility";
-    const description = `${p.title} · ${costLabel} · ${valueLabel(p)} · ${evidenceLabel}${p.frontier ? " · Frontier among complete cases" : ""}`;
+    const description = `${p.title} · ${costLabel} · ${valueLabel(p)} · ${evidenceLabel}${p.frontier ? " · Frontier among rooms with complete comparison evidence" : ""}`;
     const dot = node("circle", {
       cx: x(p.price),
       cy: y(value(p)),

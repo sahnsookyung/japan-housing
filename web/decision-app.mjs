@@ -53,6 +53,7 @@ const selectionStorage = {
   setItem: (key, value) => sessionStorage.setItem(key, value),
 };
 let activeView = initialView.view,
+  destination = initialView.destination,
   visualKeys = {},
   sourceKey,
   comparisonKey,
@@ -173,6 +174,7 @@ function params() {
   p.set("offset", offset);
   p.set("limit", 50);
   p.set("metric", $("chart-metric").value);
+  p.set("destination", destination);
   return p;
 }
 function persistView() {
@@ -188,8 +190,7 @@ function persistView() {
 }
 const map = createHousingMap({
   onEdit(d) {
-    $("destination-editor").hidden = false;
-    $("toggle-destinations").setAttribute("aria-expanded", "true");
+    showDestinationEditor(true);
     editDestination(d);
   },
   onRoom: (id) => openRoom(id).catch((e) => error(e.message)),
@@ -289,6 +290,12 @@ async function load({ fill = false } = {}) {
       controller.signal,
     );
     if (request !== sequence) return;
+    if (destination && destination !== data.destination)
+      notice(
+        "That commute location is no longer enabled. Showing all enabled locations.",
+      );
+    destination = data.destination;
+    query.set("destination", destination);
     query.delete("offset");
     data.view_query = query.toString();
     snapshot = data;
@@ -348,6 +355,18 @@ async function updateDestinations(destinations, onSaved) {
 }
 function render(data) {
   renderPinUndo();
+  $("destination").innerHTML =
+    '<option value="">All enabled locations</option>' +
+    data.destination_choices
+      .map((d) => `<option value="${esc(d.id)}">${esc(d.label)}</option>`)
+      .join("");
+  $("destination").value = destination;
+  const selectedDestination = data.destination_choices.find(
+    (d) => d.id === destination,
+  );
+  $("location-filter-note").textContent = selectedDestination
+    ? `Distance, transit and preference ranking use ${selectedDestination.label}. Your saved locations are unchanged.`
+    : "Distance, transit and preference ranking use all enabled commute locations and their relative weights.";
   $("freshness").textContent =
     `Snapshot ${new Date(data.generated_at).toLocaleString()} · ${data.status === "healthy" ? "sources current" : "partial source coverage"}`;
   $("scenario-label").innerHTML =
@@ -366,7 +385,7 @@ function render(data) {
     )
     .join("");
   $("summary").title =
-    "¹ Among potential matches; counts are for the saved scenario before search filters.";
+    "¹ Among potential matches for the saved stay and selected commute location, before search filters.";
   $("result-count").textContent = data.total.toLocaleString();
   $("browse-rooms").textContent =
     `Browse ${data.total.toLocaleString()} rooms ↓`;
@@ -420,14 +439,14 @@ function renderVisual(data) {
   );
   const coverage = data.frontier_coverage;
   $("frontier-summary").textContent =
-    `${coverage.plottable} of ${coverage.potential} potential matches have chart positions: ${coverage.complete_cases} complete cases + ${coverage.provisional} provisional. ${data.frontier_ids.length} on the frontier among complete cases. ${coverage.unplotted} lack data for a point.${coverage.outside_chart_scope ? ` ${coverage.outside_chart_scope} excluded, stale, reserved or dismissed rows stay outside the chart.` : ""}`;
+    `${coverage.plottable} of ${coverage.potential} potential matches have chart positions: ${coverage.complete_cases} with complete comparison evidence + ${coverage.provisional} needing confirmation. ${data.frontier_ids.length} on the green frontier. ${coverage.unplotted} lack data for a point.${coverage.outside_chart_scope ? ` ${coverage.outside_chart_scope} excluded, stale, reserved or dismissed rows stay outside the chart.` : ""}`;
   $("chart-room-summary").textContent =
     `Browse plotted rooms (${data.points.length}${data.points.length < data.chart_total ? ` of ${data.chart_total}` : ""}) · includes overlapping points`;
   $("chart-room-browser").hidden = !data.points.length;
   $("chart-room-list").innerHTML = data.points
     .map(
       (point) =>
-        `<div><button type="button" data-open="${esc(point.id)}">${esc(point.title)}</button><small>${point.price_is_floor ? "≥ " : ""}${yen(point.price)} / month · ${Number(point.value.toFixed(2))} ${data.frontier_metric === "distance" ? "km" : "min"} · ${point.provisional ? "Needs confirmation" : "Complete case"}</small></div>`,
+        `<div><button type="button" data-open="${esc(point.id)}">${esc(point.title)}</button><small>${point.price_is_floor ? "≥ " : ""}${yen(point.price)} / month · ${Number(point.value.toFixed(2))} ${data.frontier_metric === "distance" ? "km" : "min"} · ${point.provisional ? "Needs confirmation" : "Complete comparison evidence"}</small></div>`,
     )
     .join("");
   $("unplotted-rooms").hidden = !coverage.unplotted;
@@ -439,10 +458,14 @@ function renderVisual(data) {
         `<div><button type="button" data-open="${esc(room.id)}">${esc(room.title)}</button><small>${esc(room.reasons.join("; "))}</small></div>`,
     )
     .join("");
+  const comparedLocations = data.destination
+    ? `the selected location (${data.destination_choices.find((d) => d.id === data.destination).label})`
+    : "all enabled commute locations";
   $("distance-method").textContent =
-    data.frontier_metric === "distance"
-      ? "Geographic estimate: Haversine great-circle distance from each room pin to each enabled office pin, averaged using destination weights. Area pins reduce accuracy. This is not walking distance, rail distance or travel time, and it does not change the transit-based preference ranking. No routing API or listing scan is used."
-      : `Google Routes transit matrix (or reviewed route evidence) between saved room and office pins. Provider departure: ${data.route_schedule}. One-way minutes are averaged using destination weights. Every enabled office needs a route no older than ${data.route_cache_days} days to plot a point; unconfirmed endpoints are marked provisional. OpenStreetMap supplies the basemap, not the routes.`;
+    `Comparing against ${comparedLocations}. ` +
+    (data.frontier_metric === "distance"
+      ? "Geographic estimate: Haversine great-circle distances from each room pin, averaged using destination weights. Area pins reduce accuracy. This is not walking distance, rail distance or travel time, and it does not change the transit-based preference ranking. No routing API or listing scan is used."
+      : `Google Routes transit matrix (or reviewed route evidence) between saved room and office pins. Provider departure: ${data.route_schedule}. One-way minutes are averaged using destination weights. Every compared location needs a route no older than ${data.route_cache_days} days to plot a point; unconfirmed endpoints are marked provisional. OpenStreetMap supplies the basemap, not the routes.`);
 }
 function renderStatistics(stats) {
   $("statistics-title").textContent =
@@ -482,6 +505,12 @@ function renderStatistics(stats) {
 }
 function renderDestinations() {
   renderPinUndo();
+  const active = prefs.destinations.filter(
+    (d) => d.enabled && d.kind === "office" && d.office_days_per_week !== 0,
+  );
+  $("destination-summary").textContent = active.length
+    ? `${active.length} enabled commute ${active.length === 1 ? "location" : "locations"}. Distance and transit comparisons use your saved pins and weights.`
+    : "Add or enable a commute location to compare distance and transit. You can browse rooms without one.";
   $("destinations").innerHTML = prefs.destinations
     .map(
       (d) =>
@@ -490,6 +519,9 @@ function renderDestinations() {
     .join("");
 }
 function editDestination(d) {
+  map.cancel();
+  $("destination-form-title").textContent = d ? "Edit location" : "New location";
+  $("save-destination").textContent = d ? "Save changes" : "Add location";
   for (const key of [
     "id",
     "label",
@@ -503,6 +535,11 @@ function editDestination(d) {
       d?.[key] ?? (key === "kind" ? "office" : key === "weight" ? 1 : "");
   destForm.elements.verified.checked = !!d?.verified;
   destForm.elements.label.focus();
+}
+function showDestinationEditor(show) {
+  $("destination-editor").hidden = !show;
+  $("toggle-destinations").setAttribute("aria-expanded", String(show));
+  if (!show) map.cancel();
 }
 function renderSources(data) {
   const catalog = [
@@ -633,7 +670,7 @@ async function openRoom(id) {
   if (!$("room-dialog").open) $("room-dialog").showModal();
   let r;
   try {
-    r = await api(`/api/listing?id=${encodeURIComponent(id)}`);
+    r = await api(`/api/listing?${new URLSearchParams({ id, destination })}`);
   } catch (e) {
     if (request === detailSequence)
       $("room-detail").innerHTML =
@@ -661,7 +698,7 @@ async function openRoom(id) {
       " · ",
     )}</p>${r.campaign && Object.keys(r.campaign).length ? `<p>Campaign evidence: ${esc(r.campaign.eligibility_note || "Check exact room eligibility")} ${link(r.campaign.source_url, "Terms")}</p>` : ""}</details>
   <details open><summary>Metrics that change the decision</summary><table><tbody>${metricRows(r)}</tbody></table><p class="muted">Noise, mould/ventilation, hazard exposure, address registration and WFH reliability need room-specific evidence. A published facility label does not prove speed or quietness.</p></details>
-  <details><summary>Office routes & verification</summary><table><tbody>${r.route_metrics.destinations.map((d) => `<tr><th>${esc(d.label)}</th><td>${d.minutes == null ? "Unverified" : `${d.minutes} min`}</td><td>${d.fare_yen == null ? "Fare unknown" : yen(d.fare_yen)}</td><td>${d.source_url ? link(d.source_url, "Route evidence") : ""}</td></tr>`).join("")}</tbody></table><button id="fetch-routes" type="button">Fetch transit routes for this room</button><small>Uses configured provider credentials; saved pins are the actual route endpoints.</small><form id="route-form" class="evidence-form"><label>Destination<select name="destination_id">${prefs.destinations
+  <details><summary>Office routes & verification</summary><table><tbody>${r.route_metrics.destinations.map((d) => `<tr><th>${esc(d.label)}</th><td>${d.minutes == null ? "Unverified" : `${d.minutes} min`}</td><td>${d.fare_yen == null ? "Fare unknown" : yen(d.fare_yen)}</td><td>${d.source_url ? link(d.source_url, "Route evidence") : ""}</td></tr>`).join("")}</tbody></table><button id="fetch-routes" type="button">Fetch routes to all enabled locations</button><small>Uses configured provider credentials and all enabled commute pins, regardless of the location filter.</small><form id="route-form" class="evidence-form"><label>Destination<select name="destination_id">${prefs.destinations
     .filter((d) => d.enabled && d.kind === "office" && d.latitude != null)
     .map((d) => `<option value="${esc(d.id)}">${esc(d.label)}</option>`)
     .join(
@@ -805,7 +842,7 @@ function renderSelection() {
 }
 async function renderComparison() {
   renderSelection();
-  const key = `${snapshot.run_id}:${snapshot.scenario_key}:${snapshot.evidence_revision}:${snapshot.evaluated_at_minute}:${[...selected].join(",")}`;
+  const key = `${snapshot.run_id}:${snapshot.scenario_key}:${snapshot.evidence_revision}:${snapshot.evaluated_at_minute}:${destination}:${[...selected].join(",")}`;
   if (comparisonKey === key) return;
   comparisonKey = null;
   comparisonController?.abort();
@@ -822,6 +859,7 @@ async function renderComparison() {
   $("cost-chart").replaceChildren();
   $("crossover-note").textContent = "";
   const p = new URLSearchParams();
+  p.set("destination", destination);
   for (const id of selected) p.append("id", id);
   let data;
   try {
@@ -895,10 +933,11 @@ for (const button of document.querySelectorAll("[data-months]"))
     notice("Stay length updated in the form. Apply scenario to recalculate.");
   });
 $("toggle-destinations").addEventListener("click", () => {
-  const show = $("destination-editor").hidden;
-  $("destination-editor").hidden = !show;
-  $("toggle-destinations").setAttribute("aria-expanded", String(show));
-  if (show) renderDestinations();
+  showDestinationEditor($("destination-editor").hidden);
+});
+$("add-destination").addEventListener("click", () => {
+  showDestinationEditor(true);
+  editDestination();
 });
 $("destinations").addEventListener(
   "click",
@@ -916,6 +955,7 @@ $("destinations").addEventListener(
       await updateDestinations(
         before.filter((d) => d.id !== remove.dataset.remove),
       );
+      if (destForm.elements.id.value === removed.id) editDestination();
       notice("Location removed.");
       const undo = document.createElement("button");
       undo.textContent = "Undo";
@@ -1038,8 +1078,11 @@ for (const name of ["map", "chart"]) {
   });
 }
 let timer;
-for (const key of ["query", "status", "sort", "decision", "chart-metric"])
+for (const key of [
+  "query", "status", "sort", "decision", "destination", "chart-metric",
+])
   $(key).addEventListener(key === "query" ? "input" : "change", () => {
+    if (key === "destination") destination = $(key).value;
     clearTimeout(timer);
     timer = setTimeout(
       () => {
@@ -1057,6 +1100,7 @@ $("reload").addEventListener(
 );
 async function resetFilters() {
   clearTimeout(timer);
+  destination = defaultView.destination;
   for (const key of ["query", "status", "sort", "decision"])
     $(key).value = defaultView[key];
   offset = 0;

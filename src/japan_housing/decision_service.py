@@ -17,6 +17,7 @@ from .config import AppConfig
 from .costs import cost_scenario
 from .decision import (
     RECORD_FIELDS,
+    commute_destinations,
     decision_summary,
     frontier_value,
     project_listing,
@@ -42,6 +43,8 @@ class DecisionService:
         self.records: list[dict[str, Any]] = []
         self.by_id = {}
         self.preferences = {}
+        self.destination = ""
+        self.destination_choices = []
         self.report = {}
         self.route_lock = threading.Lock()
 
@@ -49,23 +52,33 @@ class DecisionService:
         with self.lock:
             self.key = None
 
-    def load(self) -> None:
+    def load(self, destination: str = "") -> None:
         report = self.snapshots.load()
         preferences = read_preferences(self.config)
+        choices = commute_destinations(preferences)
+        selected = next((d for d in choices if d["id"] == destination), None)
+        # Old links and removed/disabled locations fall back to the saved aggregate.
+        destination = selected["id"] if selected else ""
+        comparison_preferences = (
+            {**preferences, "destinations": [selected]} if selected else preferences
+        )
         with EvidenceStore(self.config.runtime.state_path) as evidence:
             key = (
                 report["run_id"],
                 scenario_key(preferences),
                 evidence.revision(),
                 int(time.time() // 60),
+                destination,
             )
             if key == self.key:
                 return
             originals = evidence.merge(report.get("housing", []))
         self.preferences = preferences
+        self.destination = destination
+        self.destination_choices = [{"id": d["id"], "label": d["label"]} for d in choices]
         self.report = report
         self.records = [
-            project_listing(item, preferences, self.config, include_exits=False)
+            project_listing(item, comparison_preferences, self.config, include_exits=False)
             for item in originals
         ]
         # Precompute search text once per immutable view, not per keystroke.
@@ -208,7 +221,7 @@ class DecisionService:
 
     def query(self, params: dict[str, list[str]]) -> dict[str, Any]:
         with self.lock:
-            self.load()
+            self.load(params.get("destination", [""])[0])
             rows = self._filtered(params)
             try:
                 offset = int(params.get("offset", ["0"])[0])
@@ -288,6 +301,8 @@ class DecisionService:
                 "evidence_revision": self.key[2],
                 "evaluated_at_minute": self.key[3],
                 "preferences": self.preferences,
+                "destination": self.destination,
+                "destination_choices": self.destination_choices,
                 "generated_at": self.report["generated_at"],
                 "summary": decision_summary(self.records),
                 "statistics": filtered_statistics(rows),
@@ -337,9 +352,9 @@ class DecisionService:
                 ),
             }
 
-    def detail(self, key: str) -> dict[str, Any]:
+    def detail(self, key: str, destination: str = "") -> dict[str, Any]:
         with self.lock:
-            self.load()
+            self.load(destination)
             if key not in self.by_id:
                 raise ValueError("listing is no longer present")
             return self._detail_record(self.by_id[key])
@@ -400,12 +415,12 @@ class DecisionService:
         finally:
             self.route_lock.release()
 
-    def compare(self, keys: list[str]) -> dict[str, Any]:
+    def compare(self, keys: list[str], destination: str = "") -> dict[str, Any]:
         if not 1 <= len(keys) <= 3 or len(set(keys)) != len(keys):
             raise ValueError("compare one to three distinct rooms")
         with self.lock:
-            self.load()
-            items = [self.detail(key) for key in keys]
+            self.load(destination)
+            items = [self.detail(key, destination) for key in keys]
             start = date.fromisoformat(self.preferences["move_in"])
             series = []
             for item in items:
@@ -470,13 +485,14 @@ class DecisionService:
 
     def export(self, params: dict[str, list[str]], format: str) -> tuple[bytes, str]:
         with self.lock:
-            self.load()
+            self.load(params.get("destination", [""])[0])
             rows = self._filtered(params)
             if format == "json":
                 return json.dumps(
                     {
                         "run_id": self.report["run_id"],
                         "preferences": self.preferences,
+                        "destination": self.destination,
                         "records": [self._detail_record(r) for r in rows],
                     },
                     ensure_ascii=False,
@@ -485,6 +501,9 @@ class DecisionService:
                 raise ValueError("export must be csv or json")
             out = io.StringIO()
             writer = csv.writer(out)
+            destination = self.destination
+            if destination.lstrip().startswith(("=", "+", "-", "@")):
+                destination = "'" + destination
             writer.writerow(
                 [
                     "Room",
@@ -499,6 +518,8 @@ class DecisionService:
                     "Room m2",
                     "Mean commute minutes",
                     "Source",
+                    "Mean straight-line distance km",
+                    "Commute location ID (blank = all enabled)",
                 ]
             )
             for item in rows:
@@ -520,6 +541,8 @@ class DecisionService:
                         item.get("room_area_m2"),
                         item["route_metrics"]["mean_minutes"],
                         item["url"],
+                        item["geographic_metrics"]["mean_km"],
+                        destination,
                     ]
                 )
             return out.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8"

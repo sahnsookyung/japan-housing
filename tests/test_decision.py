@@ -85,6 +85,23 @@ def item(record):
     }
 
 
+def office_destination(**overrides):
+    return {
+        "id": "custom-office",
+        "label": "My commute destination",
+        "kind": "office",
+        "latitude": 35.7,
+        "longitude": 139.7,
+        "enabled": True,
+        "weight": 1.0,
+        "office_days_per_week": None,
+        "verified": False,
+        "location_basis": "user pin",
+        "source_url": "",
+        **overrides,
+    }
+
+
 def test_calendar_anniversary_and_leap_year_are_not_ninety_days(room):
     assert add_months(date(2024, 1, 31), 1) == date(2024, 2, 29)
     assert add_months(date(2026, 1, 31), 1) == date(2026, 2, 28)
@@ -190,12 +207,16 @@ def test_zero_area_placeholder_is_unknown(room, config):
 
 def test_preferences_persist_pins_with_remote_and_unknown_destinations(config):
     p = default_preferences(config)
-    p["destinations"][0]["latitude"] = 35.8
+    assert p["destinations"] == []
+    assert read_preferences(config)["destinations"] == []
+    p["destinations"] = [
+        office_destination(latitude=35.8),
+        office_destination(id="remote", kind="remote", latitude=None, longitude=None),
+        office_destination(id="unknown", kind="unknown", latitude=None, longitude=None),
+        office_destination(id="optional", enabled=False),
+    ]
     save_preferences(config, p)
     assert read_preferences(config) == validate_preferences(p)
-    assert len(p["destinations"]) == 11
-    assert any(d["kind"] == "remote" and d["latitude"] is None for d in p["destinations"])
-    assert next(d for d in p["destinations"] if d["id"] == "lunaris")["enabled"] is False
     for invalid in (float("nan"), 91, True):
         bad = json.loads(json.dumps(p))
         bad["destinations"][0]["latitude"] = invalid
@@ -208,7 +229,7 @@ def test_preferences_persist_pins_with_remote_and_unknown_destinations(config):
 
 
 def with_route(record, prefs):
-    d = prefs["destinations"][0]
+    d = office_destination()
     prefs["destinations"] = [d]
     d["verified"] = True
     record.metrics_evidence = {
@@ -226,6 +247,258 @@ def with_route(record, prefs):
             }
         ]
     }
+
+
+def test_only_saved_user_locations_drive_geographic_comparisons(room, config):
+    report = {"run_id": "custom-pins", "generated_at": iso_now(), "housing": [item(room)]}
+    service = DecisionService(config, SimpleNamespace(load=lambda: report))
+    params = {"metric": ["distance"]}
+    empty = service.query(params)
+    assert empty["total"] == 1 and not empty["points"] and not empty["frontier_ids"]
+    assert empty["records"][0]["geographic_metrics"]["mean_km"] is None
+    assert empty["records"][0]["route_metrics"]["required"] == 0
+
+    p = empty["preferences"]
+    p["destinations"] = [office_destination()]
+    service.save(p)
+    first = service.query(params)
+    assert first["frontier_ids"] == [room.stable_key]
+    p["destinations"][0]["longitude"] = 139.8
+    service.save(p)
+    moved = service.query(params)
+    assert moved["points"][0]["value"] > first["points"][0]["value"]
+    assert moved["records"][0]["route_metrics"]["mean_minutes"] is None
+
+    p["destinations"][0]["enabled"] = False
+    service.save(p)
+    assert not service.query(params)["points"]
+    p["destinations"] = []
+    service.save(p)
+    assert read_preferences(config)["destinations"] == []
+    assert not service.query(params)["points"]
+
+
+@pytest.fixture
+def pin_scenario(config, room):
+    west = replace(room, external_id="west", title="West room", longitude=139.6)
+    east = replace(room, external_id="east", title="East room", longitude=139.8)
+    unknown = replace(room, external_id="unknown", latitude=None, longitude=None)
+    preferences = {
+        **default_preferences(config),
+        "destinations": [
+            office_destination(id="west-pin", label="West office", longitude=139.6),
+            office_destination(id="east-pin", label="East office", longitude=139.8, weight=3),
+        ],
+    }
+    report = {
+        "run_id": "pin-scenario",
+        "generated_at": iso_now(),
+        "housing": [item(west), item(east), item(unknown)],
+    }
+    service = DecisionService(config, SimpleNamespace(load=lambda: report))
+    service.save(preferences)
+    return SimpleNamespace(
+        service=service, preferences=preferences, west=west, east=east, unknown=unknown
+    )
+
+
+def test_saved_pin_moves_and_undo_refresh_distance_order_points_and_map_frontier(
+    config, pin_scenario
+):
+    s = pin_scenario
+    params = {"metric": ["distance"], "sort": ["distance"]}
+    original = s.service.query(params)
+    assert [r["stable_key"] for r in original["records"]] == [
+        s.east.stable_key,
+        s.west.stable_key,
+        s.unknown.stable_key,
+    ]
+    # At latitude 35.7°, 0.2° longitude is about 18.06 km along a great circle.
+    assert original["records"][0]["geographic_metrics"]["mean_km"] == pytest.approx(4.515, abs=0.01)
+    assert original["records"][1]["geographic_metrics"]["mean_km"] == pytest.approx(
+        13.545, abs=0.02
+    )
+    assert original["frontier_ids"] == [s.east.stable_key]
+    original_preferences = json.loads(json.dumps(s.preferences))
+    s.preferences["destinations"][1]["longitude"] = 139.6
+    # Saving externally must also invalidate a warmed projection, without a manual reload hook.
+    save_preferences(config, s.preferences)
+    moved = s.service.query(params)
+    assert moved["scenario_key"] != original["scenario_key"]
+    assert [r["stable_key"] for r in moved["records"]] == [
+        s.west.stable_key,
+        s.east.stable_key,
+        s.unknown.stable_key,
+    ]
+    assert moved["records"][0]["geographic_metrics"]["mean_km"] == 0
+    assert moved["records"][1]["geographic_metrics"]["mean_km"] == pytest.approx(18.06, abs=0.03)
+    assert moved["frontier_ids"] == [s.west.stable_key]
+    assert {p["id"]: p["value"] for p in moved["points"]}[s.west.stable_key] == 0
+    assert {r["id"] for group in moved["map_points"] for r in group["rooms"] if r["frontier"]} == {
+        s.west.stable_key
+    }
+    save_preferences(config, original_preferences)
+    restored = s.service.query(params)
+    for field in ("scenario_key", "records", "points", "frontier_ids", "map_points", "statistics"):
+        assert restored[field] == original[field]
+
+
+def test_location_filter_choices_and_each_pin_recompute_the_same_view(pin_scenario, config):
+    s = pin_scenario
+    all_locations = s.service.query({"metric": ["distance"]})
+    assert all_locations["destination_choices"] == [
+        {"id": "west-pin", "label": "West office"},
+        {"id": "east-pin", "label": "East office"},
+    ]
+    assert all_locations["destination"] == ""
+    for pin, closest in (("west-pin", s.west), ("east-pin", s.east)):
+        params = {"destination": [pin], "metric": ["distance"], "sort": ["distance"]}
+        page = s.service.query(params)
+        assert page["destination"] == pin
+        assert page["records"][0]["stable_key"] == closest.stable_key
+        assert page["records"][0]["geographic_metrics"]["mean_km"] == 0
+        assert page["records"][0]["geographic_metrics"]["required"] == 1
+        assert page["frontier_ids"] == [closest.stable_key]
+        detail = s.service.detail(closest.stable_key, pin)
+        compared = s.service.compare([closest.stable_key], pin)["records"][0]
+        exported = json.loads(s.service.export(params, "json")[0])
+        assert exported["destination"] == pin
+        csv_rows = list(
+            csv.DictReader(io.StringIO(s.service.export(params, "csv")[0].decode("utf-8-sig")))
+        )
+        assert float(csv_rows[0]["Mean straight-line distance km"]) == 0
+        assert csv_rows[0]["Commute location ID (blank = all enabled)"] == pin
+        for row in (detail, compared, exported["records"][0]):
+            assert row["geographic_metrics"] == page["records"][0]["geographic_metrics"]
+        filtered = s.service.query({**params, "query": [closest.title], "limit": ["1"]})
+        assert filtered["total"] == 1 and filtered["frontier_ids"] == [closest.stable_key]
+    assert read_preferences(config) == validate_preferences(s.preferences)
+    # A subsequent unfiltered request must not inherit the previous location selection.
+    assert s.service.query({"metric": ["distance"]})["points"] == all_locations["points"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_km"),
+    [("latitude", 35.8, 11.1195), ("longitude", 139.8, 18.06)],
+)
+def test_selected_pin_coordinate_changes_refresh_only_its_distances(
+    pin_scenario, field, value, expected_km
+):
+    s = pin_scenario
+    other_params = {"destination": ["east-pin"], "metric": ["distance"]}
+    other_before = s.service.query(other_params)
+    params = {"destination": ["west-pin"], "metric": ["distance"]}
+    before = s.service.query(params)
+    s.preferences["destinations"][0][field] = value
+    s.service.save(s.preferences)
+    after = s.service.query(params)
+    assert after["destination"] == "west-pin"
+    assert after["scenario_key"] != before["scenario_key"]
+    west_metrics = next(r for r in after["records"] if r["stable_key"] == s.west.stable_key)[
+        "geographic_metrics"
+    ]
+    assert west_metrics["mean_km"] == pytest.approx(expected_km, abs=0.03)
+    assert west_metrics["worst_km"] == west_metrics["mean_km"]
+    assert west_metrics["observed"] == west_metrics["required"] == 1
+    assert west_metrics["complete"]
+    assert s.service.query(other_params)["points"] == other_before["points"]
+
+
+def test_weights_and_new_pins_refresh_the_aggregate_and_filter_choices(pin_scenario):
+    s = pin_scenario
+    s.service.query({"metric": ["distance"]})
+    s.preferences["destinations"][1]["weight"] = 1
+    s.service.save(s.preferences)
+    equal = s.service.query({"metric": ["distance"]})
+    assert set(equal["frontier_ids"]) == {s.east.stable_key, s.west.stable_key}
+    assert all(p["value"] == pytest.approx(9.03, abs=0.02) for p in equal["points"])
+    new_pin = office_destination(id="new & custom / 中野", label="New workplace", longitude=139.6)
+    s.preferences["destinations"].append(new_pin)
+    s.service.save(s.preferences)
+    added = s.service.query({"destination": [new_pin["id"]], "metric": ["distance"]})
+    assert added["destination_choices"][-1] == {"id": new_pin["id"], "label": new_pin["label"]}
+    assert added["destination"] == new_pin["id"]
+    assert added["frontier_ids"] == [s.west.stable_key]
+
+
+def test_location_selection_uses_matching_routes_and_pin_moves_invalidate_only_that_endpoint(
+    pin_scenario, config
+):
+    s = pin_scenario
+    for d in s.preferences["destinations"]:
+        d["verified"] = True
+    s.service.save(s.preferences)
+    routes = [
+        {
+            "destination_id": d["id"],
+            "destination_latitude": d["latitude"],
+            "destination_longitude": d["longitude"],
+            "origin_latitude": s.west.latitude,
+            "origin_longitude": s.west.longitude,
+            "minutes": minutes,
+            "verified_at": date.today().isoformat(),
+            "source_url": "https://example.com/route",
+        }
+        for d, minutes in zip(s.preferences["destinations"], (30, 60), strict=True)
+    ]
+    with EvidenceStore(config.runtime.state_path) as store:
+        store.add(
+            s.west.stable_key,
+            {
+                "kind": "published",
+                "source_url": "https://example.com/route",
+                "values": {"metrics_evidence": {"routes": routes}},
+            },
+        )
+    for destination, minutes in (("west-pin", 30), ("east-pin", 60), ("", 52.5)):
+        detail = s.service.detail(s.west.stable_key, destination)
+        assert detail["route_metrics"]["complete"]
+        assert detail["route_metrics"]["mean_minutes"] == minutes
+        page = s.service.query({"destination": [destination], "metric": ["transit"]})
+        assert page["points"][0]["value"] == minutes
+    s.preferences["destinations"][0]["latitude"] += 0.01
+    s.service.save(s.preferences)
+    assert not s.service.query({"destination": ["west-pin"], "metric": ["transit"]})["points"]
+    east = s.service.query({"destination": ["east-pin"], "metric": ["transit"]})
+    assert east["points"][0]["value"] == 60 and not east["points"][0]["provisional"]
+    all_routes = s.service.detail(s.west.stable_key)["route_metrics"]
+    assert not all_routes["complete"] and all_routes["observed"] == 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["rename", "disable", "remove", "remote", "unknown", "relocation", "zero_days", "missing_pin"],
+)
+def test_location_filter_tracks_saved_pin_changes_and_stale_selections(pin_scenario, change):
+    s = pin_scenario
+    params = {"destination": ["west-pin"], "metric": ["distance"]}
+    s.service.query(params)
+    pin = s.preferences["destinations"][0]
+    if change == "rename":
+        pin["label"] = "Renamed office"
+    elif change == "disable":
+        pin["enabled"] = False
+    elif change == "remove":
+        s.preferences["destinations"].pop(0)
+    elif change in {"remote", "unknown", "relocation"}:
+        pin["kind"] = change
+    elif change == "zero_days":
+        pin["office_days_per_week"] = 0
+    else:
+        pin["latitude"] = pin["longitude"] = None
+    s.service.save(s.preferences)
+    page = s.service.query(params)
+    choices = {d["id"]: d["label"] for d in page["destination_choices"]}
+    if change == "rename":
+        assert page["destination"] == "west-pin" and choices["west-pin"] == "Renamed office"
+        assert page["frontier_ids"] == [s.west.stable_key]
+    elif change == "missing_pin":
+        assert page["destination"] == "west-pin" and "west-pin" in choices
+        assert not page["points"] and not page["frontier_ids"]
+    else:
+        assert page["destination"] == "" and "west-pin" not in choices
+        assert page["frontier_ids"] == [s.east.stable_key]
+    assert s.service.query({"destination": ["deleted-pin"]})["destination"] == ""
 
 
 def test_pin_move_invalidates_routes_and_remote_does_not_count(room, config):
@@ -462,7 +735,7 @@ def test_geographic_frontier_uses_weighted_haversine_without_inventing_transit(r
     from japan_housing.policy import straight_line_distance_km
 
     p = default_preferences(config)
-    first = {**p["destinations"][0], "latitude": 35.7, "longitude": 139.7}
+    first = office_destination()
     second = {**first, "id": "other", "longitude": 139.8, "weight": 3}
     p["destinations"] = [first, second]
     r = project_listing(item(room), p, config)
@@ -481,6 +754,9 @@ def test_geographic_frontier_uses_weighted_haversine_without_inventing_transit(r
 
 
 def test_chart_plots_provisional_matches_beyond_the_table_page_without_promoting_them(room, config):
+    save_preferences(
+        config, {**default_preferences(config), "destinations": [office_destination()]}
+    )
     pending = [
         item(
             replace(
@@ -509,6 +785,9 @@ def test_chart_plots_provisional_matches_beyond_the_table_page_without_promoting
 
 
 def test_chart_accounts_for_missing_values_and_keeps_hard_failures_out(room, config):
+    save_preferences(
+        config, {**default_preferences(config), "destinations": [office_destination()]}
+    )
     missing_cost = item(replace(room, external_id="no-cost", recurring_total_yen=None))
     missing_pin = item(replace(room, external_id="no-pin", latitude=None, longitude=None))
     excluded = item(replace(room, external_id="over-budget", recurring_total_yen=100000))
@@ -575,12 +854,39 @@ def test_http_preferences_evidence_import_and_error_boundaries(
                 client.post("/api/preferences", json=default_preferences(config)).status_code == 403
             )
             p = client.get("/api/decision").json()["preferences"]
-            p["destinations"][0]["latitude"] = 35.75
+            assert p["destinations"] == []
+            p["destinations"] = [office_destination(latitude=35.75)]
             assert client.post("/api/preferences", json=p, headers=headers).status_code == 200
             assert (
                 client.get("/api/decision").json()["preferences"]["destinations"][0]["latitude"]
                 == 35.75
             )
+            p["destinations"].append(
+                office_destination(id="+second", label="Second office", longitude=139.8)
+            )
+            assert client.post("/api/preferences", json=p, headers=headers).status_code == 200
+            params = {"destination": "+second", "metric": "distance"}
+            page = client.get("/api/decision", params=params).json()
+            assert page["destination_choices"][-1] == {"id": "+second", "label": "Second office"}
+            assert page["destination"] == "+second"
+            metrics = page["records"][0]["geographic_metrics"]
+            for path in ("/api/listing", "/api/compare", "/api/export"):
+                response = client.get(
+                    path, params={**params, "id": room.stable_key, "format": "json"}
+                )
+                assert response.status_code == 200
+                result = response.json()
+                row = result if path == "/api/listing" else result["records"][0]
+                assert row["geographic_metrics"] == metrics
+            response = client.get("/api/export", params={**params, "format": "csv"})
+            exported = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+            assert exported[0]["Commute location ID (blank = all enabled)"] == "'+second"
+            p["destinations"][1]["longitude"] = room.longitude
+            assert client.post("/api/preferences", json=p, headers=headers).status_code == 200
+            moved = client.get("/api/decision", params=params).json()
+            assert moved["destination"] == "+second"
+            assert moved["records"][0]["geographic_metrics"]["mean_km"] == 0
+            assert metrics["mean_km"] > 0
             assert client.post("/api/import", json=[], headers=headers).status_code == 400
             partial = {
                 "stable_key": room.stable_key,
@@ -619,7 +925,7 @@ def test_route_request_uses_saved_pins_and_only_transit(room, config, monkeypatc
 
     p = default_preferences(config)
     p["destinations"] = [
-        {**p["destinations"][0], "id": str(i), "latitude": 35.6 + i * 0.001} for i in range(20)
+        office_destination(id=str(i), latitude=35.6 + i * 0.001) for i in range(20)
     ]
     monkeypatch.setattr(
         "japan_housing.decision_routes.resolve_routes_api_key", lambda *a, **k: "test-key"

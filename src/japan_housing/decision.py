@@ -24,20 +24,6 @@ DESTINATION_KINDS = {"office", "remote", "unknown", "relocation"}
 
 
 def default_preferences(config: AppConfig) -> dict[str, Any]:
-    # These are user-supplied employment areas, not verified office entrances.
-    locations = [
-        ("mercari", "Mercari · Roppongi (2 roles)", "office", 35.6628, 139.7315),
-        ("zeals", "ZEALS · Meguro area", "office", 35.6339, 139.7158),
-        ("shippio", "Shippio · Hamamatsucho / Shibaura area", "office", 35.6554, 139.7571),
-        ("soracom", "SORACOM · Motoakasaka area", "office", 35.6788, 139.7295),
-        ("mujin", "Mujin · Tatsumi area", "office", 35.6456, 139.8105),
-        ("abbeal", "Abbeal · client office undisclosed", "unknown", None, None),
-        ("buildio", "Build.io · office undisclosed", "unknown", None, None),
-        ("rokken", "Rokken · Osaka / Sakai (relocation)", "relocation", None, None),
-        ("emotion", "eMotion Fleet · remote within Japan", "remote", None, None),
-        ("moneytree", "Moneytree · remote within Japan", "remote", None, None),
-        ("lunaris", "Lunaris · Kichijoji (optional)", "office", 35.7027778, 139.5797222),
-    ]
     start = max(date(2026, 9, 10), date.today())
     return {
         "version": 1,
@@ -50,24 +36,7 @@ def default_preferences(config: AppConfig) -> dict[str, Any]:
         "commute_limit_minutes": 60,
         "price_weight": 0.85,
         "transport_days_per_month": 0,
-        "destinations": [
-            {
-                "id": key,
-                "label": label,
-                "kind": kind,
-                "latitude": lat,
-                "longitude": lon,
-                "enabled": key != "lunaris",
-                "weight": 1.0,
-                "office_days_per_week": None,
-                "location_basis": "area approximation; office entrance unverified"
-                if lat
-                else "unverified",
-                "source_url": "",
-                "verified": False,
-            }
-            for key, label, kind, lat, lon in locations
-        ],
+        "destinations": [],
     }
 
 
@@ -207,14 +176,18 @@ def scenario_key(preferences: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(preferences, sort_keys=True).encode()).hexdigest()[:20]
 
 
-def _route_metrics(
-    item: dict[str, Any], preferences: dict[str, Any], config: AppConfig
-) -> dict[str, Any]:
-    targets = [
+def commute_destinations(preferences: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
         d
         for d in preferences["destinations"]
         if d["enabled"] and d["kind"] == "office" and d.get("office_days_per_week") != 0
     ]
+
+
+def _route_metrics(
+    item: dict[str, Any], preferences: dict[str, Any], config: AppConfig
+) -> dict[str, Any]:
+    targets = commute_destinations(preferences)
     routes = []
     supplied = item.get("metrics_evidence", {}).get("routes", [])
     # Only matching endpoints, schedule and fresh observations count; history is retained.
@@ -306,11 +279,7 @@ def _route_metrics(
 
 
 def geographic_metrics(item: dict[str, Any], preferences: dict[str, Any]) -> dict[str, Any]:
-    targets = [
-        d
-        for d in preferences["destinations"]
-        if d["enabled"] and d["kind"] == "office" and d.get("office_days_per_week") != 0
-    ]
+    targets = commute_destinations(preferences)
     distances = []
     if item.get("latitude") is not None and item.get("longitude") is not None:
         for destination in targets:

@@ -1,4 +1,23 @@
 /** Normal interactive tile viewing only; no prefetching or geocoding requests. */
+const destinationSymbols = {
+  office: {
+    label: "Office destination",
+    html: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18M10 12v3h4v-3"/></svg>',
+  },
+  relocation: { label: "Relocation destination", html: "↗" },
+  unknown: { label: "Office location unconfirmed", html: "?" },
+};
+
+function legendItem(className, html, label) {
+  const item = document.createElement("span"),
+    symbol = document.createElement("span");
+  symbol.className = `${className} map-key-marker`;
+  symbol.setAttribute("aria-hidden", "true");
+  symbol.innerHTML = html;
+  item.append(symbol, document.createTextNode(label));
+  return item;
+}
+
 export function createHousingMap({ onRoom, onDrop, onMove, onEdit, onError }) {
   if (!globalThis.L) {
     onError(
@@ -51,6 +70,7 @@ export function createHousingMap({ onRoom, onDrop, onMove, onEdit, onError }) {
     cancel();
     temporary = L.marker(e.latlng, {
       icon: icon("destination-pin", "+"),
+      title: "New destination — not yet saved",
       keyboard: false,
     }).addTo(map);
     onDrop(e.latlng.lat, e.latlng.lng);
@@ -60,23 +80,28 @@ export function createHousingMap({ onRoom, onDrop, onMove, onEdit, onError }) {
     destinations.clearLayers();
     roomMarkers.clear();
     for (const group of data.map_points) {
-      const marker = L.marker([group.latitude, group.longitude], {
-        icon: icon(
-          group.rooms.some((r) => r.frontier)
-            ? "room-pin frontier-pin"
-            : "room-pin",
-          group.count > 1 ? group.count : "•",
-        ),
-        title: `${group.count} room(s)`,
-        keyboard: true,
-      }).addTo(homes);
-      const hover = document.createElement("div");
-      hover.textContent =
+      const frontier = group.rooms.some((r) => r.frontier);
+      const countLabel = `${group.count} ${group.count === 1 ? "room" : "rooms"} at this location`;
+      const names =
         group.rooms
           .slice(0, 3)
           .map((room) => room.title)
           .join(" · ") +
         (group.count > 3 ? ` · ${group.count - 3} more rooms` : "");
+      const label = `${countLabel}: ${names}${frontier ? " · Contains a frontier room" : ""}`;
+      const marker = L.marker([group.latitude, group.longitude], {
+        icon: icon(
+          frontier ? "room-pin frontier-pin" : "room-pin",
+          group.count,
+        ),
+        title: label,
+        keyboard: true,
+      }).addTo(homes);
+      marker
+        .getElement()
+        ?.setAttribute("aria-label", `${label}. Open room choices.`);
+      const hover = document.createElement("div");
+      hover.textContent = label;
       hover.style.maxWidth = "260px";
       hover.style.whiteSpace = "normal";
       marker.bindTooltip(hover);
@@ -97,6 +122,7 @@ export function createHousingMap({ onRoom, onDrop, onMove, onEdit, onError }) {
       marker.bindPopup(popup, { maxWidth: 310 });
     }
     const bounds = [];
+    const visibleKinds = new Set();
     for (const destination of data.preferences.destinations) {
       if (
         !destination.enabled ||
@@ -104,16 +130,18 @@ export function createHousingMap({ onRoom, onDrop, onMove, onEdit, onError }) {
         destination.kind === "remote"
       )
         continue;
+      visibleKinds.add(destination.kind);
+      const symbol = destinationSymbols[destination.kind];
+      const label = `${symbol.label}: ${destination.label} · ${destination.verified ? "confirmed" : "approximate"}`;
+      const description = `${label}. Select to edit, or drag to preview a move.`;
       const marker = L.marker([destination.latitude, destination.longitude], {
-        icon: icon(
-          "destination-pin",
-          destination.kind === "relocation" ? "R" : "W",
-        ),
+        icon: icon("destination-pin", symbol.html),
         draggable: true,
-        title: `${destination.label}. Drag to preview a move, then confirm or cancel.`,
+        title: description,
       }).addTo(destinations);
+      marker.getElement()?.setAttribute("aria-label", description);
       const tip = document.createElement("span");
-      tip.textContent = `${destination.label} · ${destination.verified ? "confirmed" : "approximate"}`;
+      tip.textContent = label;
       marker.bindTooltip(tip);
       let reviewingMove = false;
       marker.on("dragstart", () => {
@@ -140,6 +168,15 @@ export function createHousingMap({ onRoom, onDrop, onMove, onEdit, onError }) {
       if (destination.kind === "office")
         bounds.push([destination.latitude, destination.longitude]);
     }
+    document.getElementById("map-legend").replaceChildren(
+      legendItem("room-pin", "1", "Rooms at this location"),
+      ...Object.entries(destinationSymbols)
+        .filter(([kind]) => kind === "office" || visibleKinds.has(kind))
+        .map(([, symbol]) =>
+          legendItem("destination-pin", symbol.html, symbol.label),
+        ),
+      legendItem("room-pin frontier-pin", "1", "Contains a frontier room"),
+    );
     if (!fitted && bounds.length) {
       map.fitBounds(bounds, { padding: [35, 35], maxZoom: 12 });
       fitted = true;

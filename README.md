@@ -10,7 +10,8 @@ before moving in, and the evidence still missing from each listing.
 
 ![Desktop room list alongside the Tokyo map, grouped housing markers, and office destination pins](docs/screenshots/map-and-list.jpg)
 
-*Screenshots use a saved September 2026 snapshot; prices and availability are historical.*
+*Screenshots use a saved September 2026 snapshot and example destinations;
+prices and availability are historical.*
 
 [Quick start](#quick-start) · [Dashboard](#using-the-dashboard) ·
 [Sources](#sources-and-coverage) · [Configuration](#configuration-and-local-data) ·
@@ -52,18 +53,29 @@ chart, comparisons, and exports all use that saved scenario. Move-out is exclusi
 
 ### Map and pins
 
-Use **Edit locations → Drop pin on map** to add possible workplaces, or enter their
-coordinates. Give destinations relative weights when some locations matter more than others.
+New scenarios start without destination pins. Use **Add location → Drop pin on map** to
+place an office, station or other commute destination, or enter its coordinates, then save.
+**Manage locations** lets you rename, disable or remove saved destinations. Give them
+relative weights when some locations matter more than others.
 Location comparisons use enabled office destinations, excluding those marked for no office
 attendance. Remote work, unknown offices, and relocation possibilities stay separate.
 
-Housing markers group rooms at the same coordinates. Click a marker to choose a room and
-open its details. Green outlines identify groups containing a frontier room for the selected
-metric. Rooms without coordinates remain accessible in the list.
+Use the **Commute location** filter to compare against an individual saved location or the
+weighted average of **All enabled locations**. The selection applies to distance sorting,
+transit, the frontier, room details, comparisons and exports, and survives reload in the URL.
+Renamed pins keep their selection; deleting or disabling the selected location returns the
+view to all enabled locations. This filter does not change your saved pins or request routes.
+
+Numbered circles show how many rooms share a location, including **1** for a single room.
+Square briefcase markers identify office destinations; the map key explains the symbols.
+Click a circle to choose a room and open its details. Green rings identify locations containing
+a frontier room for the selected metric. Rooms without coordinates remain accessible in the list.
 
 Drag a destination to preview a move, then confirm or cancel. **Undo last pin change** restores
-the previous pin state. Starting pins are approximate areas: confirm office entrances before
-relying on transit results. Editing pins does not trigger a crawl or route request.
+the previous pin state. Confirm exact destinations before relying on transit results.
+Saving a pin updates geographic comparisons; transit needs routes matching the saved pins.
+Without enabled commute destinations, you can still browse rooms and compare costs.
+Editing pins does not trigger a crawl or route request. Existing saved locations are retained.
 
 ### Pareto frontier
 
@@ -82,9 +94,10 @@ The horizontal axis is **effective monthly stay expense**. The vertical axis is 
   observations for every relevant office; a partial set of routes is not plotted.
 
 Lower and farther left are better. **Filled points** have complete expenses and meet the
-scenario requirements; transit complete cases also require confirmed endpoints. **Green
-points and solid steps** highlight their frontier. **Hollow amber points and dashed steps**
-show provisional alternatives.
+scenario requirements, with data for the selected location metric; transit also requires
+confirmed endpoints. These are the **complete cases**. **Green points and solid steps** show
+the frontier within that subset, rather than among every listing. **Hollow amber points and
+dashed steps** show provisional alternatives.
 Missing fees make their plotted costs minimums that can rise, so green points are not proven
 winners over unverified rooms. Steps mark dominance boundaries, not additional offers.
 

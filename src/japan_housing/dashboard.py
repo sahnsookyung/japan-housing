@@ -413,9 +413,19 @@ def _handler(config: AppConfig, web_root: Path) -> type[BaseHTTPRequestHandler]:
                     if path == "/api/decision":
                         self._json(200, decisions.query(params))
                     elif path == "/api/listing":
-                        self._json(200, decisions.detail(params.get("id", [""])[0]))
+                        self._json(
+                            200,
+                            decisions.detail(
+                                params.get("id", [""])[0], params.get("destination", [""])[0]
+                            ),
+                        )
                     elif path == "/api/compare":
-                        self._json(200, decisions.compare(params.get("id", [])))
+                        self._json(
+                            200,
+                            decisions.compare(
+                                params.get("id", []), params.get("destination", [""])[0]
+                            ),
+                        )
                     else:
                         body, mime = decisions.export(params, params.get("format", ["json"])[0])
                         self._headers(200, mime, len(body))

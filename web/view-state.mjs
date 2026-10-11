@@ -3,6 +3,7 @@ export const defaultView = {
   status: "feasible",
   sort: "recommended",
   decision: "all",
+  destination: "",
   metric: "distance",
   view: "map",
   offset: 0,
@@ -40,6 +41,8 @@ export function readViewState(search) {
   const params = new URLSearchParams(search),
     state = { ...defaultView };
   state.query = (params.get("query") || "").slice(0, 200);
+  const destination = params.get("destination") || "";
+  if (destination.length <= 80) state.destination = destination;
   for (const [key, values] of Object.entries(choices))
     if (values.includes(params.get(key))) state[key] = params.get(key);
   const offset = Number(params.get("offset"));

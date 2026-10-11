@@ -127,18 +127,15 @@
         </summary>
         <div id="summary" class="summary" aria-label="Evidence funnel"></div>
         <p class="muted summary-caption">
-          Entire saved scenario · before search filters. Coverage counts refer
-          to potential matches.
+          Saved stay and selected commute location · before search filters.
+          Coverage counts refer to potential matches.
         </p>
       </details>
       <section class="destinations-panel">
         <div class="section-line">
           <div>
-            <h2>Where might you work?</h2>
-            <p>
-              Office pins affect commutes. Remote and relocation destinations
-              stay separate.
-            </p>
+            <h2>Your commute locations</h2>
+            <p id="destination-summary"></p>
           </div>
           <div class="actions">
             <button id="undo-pin" type="button" disabled>
@@ -149,17 +146,27 @@
               aria-expanded="false"
               aria-controls="destination-editor"
             >
-              Edit locations
+              Manage locations
+            </button>
+            <button id="add-destination" class="primary" type="button">
+              Add location
             </button>
           </div>
         </div>
         <div id="destination-editor" hidden>
           <p class="muted">
-            Starting pins are area approximations from your job list. Confirm
-            office entrances before relying on routes. Kichijoji is optional.
+            Add any office, station or other place you commute to. Drop a pin or
+            enter coordinates, then save. Click a saved pin to edit it, or drag
+            it to move. Only enabled office commute locations count in
+            comparisons; remote and relocation plans stay separate.
           </p>
           <div id="destinations"></div>
-          <form id="destination-form" class="destination-form">
+          <h3 id="destination-form-title">New location</h3>
+          <form
+            id="destination-form"
+            class="destination-form"
+            aria-labelledby="destination-form-title"
+          >
             <input type="hidden" name="id" /><label
               >Name<input
                 name="label"
@@ -214,7 +221,8 @@
             >
             <div class="actions">
               <button id="drop-pin" type="button">Drop pin on map</button
-              ><button class="primary" type="submit">Save location</button
+              ><button id="save-destination" class="primary" type="submit">
+                Add location</button
               ><button id="cancel-destination" type="button">
                 Cancel edit
               </button>
@@ -249,6 +257,13 @@
             <option value="verification">Fewest unknown costs</option>
           </select></label
         ><label
+          >Commute location<select
+            id="destination"
+            aria-describedby="location-filter-note"
+          >
+            <option value="">All enabled locations</option>
+          </select></label
+        ><label
           >Decision<select id="decision">
             <option value="all">All</option>
             <option value="new">Not reviewed</option>
@@ -273,6 +288,7 @@
         </div>
         <button id="reset-filters" type="button">Reset filters</button>
       </div>
+      <p id="location-filter-note" class="muted"></p>
       <details id="view-statistics" class="view-statistics">
         <summary id="statistics-title">Statistics for this view</summary>
         <div id="statistics-cards" class="statistics-cards"></div>
@@ -342,14 +358,21 @@
           </div>
           <div id="map-panel" role="tabpanel" aria-labelledby="map-tab">
             <div
+              id="map-legend"
+              class="map-legend"
+              role="group"
+              aria-label="Map key"
+            ></div>
+            <div
               id="housing-map"
               aria-label="Housing and editable destination map"
             ></div>
             <p id="map-note" class="muted"></p>
             <p class="muted">
-              Drag a destination pin to preview a move, then confirm or cancel.
-              Green outlined room pins contain a Pareto choice for the selected
-              metric.
+              Select a numbered circle to browse rooms. Select an office
+              marker to edit it, or drag to preview a move, then confirm or
+              cancel. Outlined circles contain a frontier room for the selected
+              cost/location metric.
             </p>
           </div>
           <div
@@ -370,8 +393,8 @@
             <p id="frontier-summary" class="muted" aria-live="polite"></p>
             <div class="chart-legend" aria-label="Chart legend">
               <span
-                ><i class="legend-boundary" aria-hidden="true"></i>Complete-case
-                boundary</span
+                ><i class="legend-boundary" aria-hidden="true"></i>Frontier ·
+                complete evidence</span
               >
               <span
                 ><i class="legend-provisional-boundary" aria-hidden="true"></i
@@ -379,17 +402,23 @@
               >
               <span
                 ><i class="legend-frontier" aria-hidden="true"></i>Frontier
-                among complete cases</span
+                room · complete evidence</span
               >
               <span
                 ><i class="legend-complete" aria-hidden="true"></i>Other
-                complete cases</span
+                rooms · complete evidence</span
               >
               <span
                 ><i class="legend-provisional" aria-hidden="true"></i>Needs
                 confirmation · known minimum if fees are missing</span
               >
             </div>
+            <p class="muted" id="frontier-explanation">
+              The solid green line compares only rooms that meet your requirements
+              and have complete stay costs and the selected location data.
+              These are the “complete cases.” It shows their cost/location
+              trade-offs, not proof that rooms needing confirmation are worse.
+            </p>
             <div id="tradeoff-chart"></div>
             <details id="chart-room-browser">
               <summary id="chart-room-summary">Browse plotted rooms</summary>
@@ -401,17 +430,13 @@
             </details>
             <p id="distance-method" class="muted"></p>
             <p class="muted">
-              All potential matches with enough data are plotted. The frontier
-              highlights rooms that cannot be beaten on both price and location
-              among complete cases. Provisional rooms remain visible; missing
-              fees may increase their final price. A highlighted room is not a
-              proven winner over unverified alternatives. Solid green steps show
-              the complete-case boundary; dashed amber steps show the
-              provisional frontier using the currently plotted values. Steps
-              show the boundary of dominated values, not extra rooms or
-              interpolated offers. Hover or focus a point for its property name.
-              The 85:15 preference ranks rooms separately; it does not define
-              the frontier.
+              Lower cost and shorter distance or transit time are better. A room
+              is on a frontier when no other room in that comparison is at least
+              as good on both measures and better on one. Dashed amber steps use
+              the plotted values, including provisional rooms whose missing fees
+              may raise their price. Steps mark a boundary, not additional offers.
+              Hover or focus a point for its name. Preference weights affect
+              ranking, not the frontier.
             </p>
           </div>
         </section>
